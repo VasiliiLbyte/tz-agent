@@ -5,14 +5,9 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-"""
-Агент-писатель: генерирует черновик ТЗ на основе контекста, входных данных и предыдущих замечаний.
-"""
-
 import os
 import logging
 from typing import Dict, Any, List
-import json
 
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -21,7 +16,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
-
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY не найден в .env файле")
@@ -30,9 +24,6 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 MODEL = "gpt-4-turbo-preview"
 
 def build_prompt(context: List[Dict[str, Any]], input_data: Dict[str, Any], issues: List[str] = None) -> str:
-    """
-    Строит промпт для GPT на основе контекста, входных данных и предыдущих замечаний.
-    """
     context_text = ""
     for i, chunk in enumerate(context, 1):
         source = chunk['metadata'].get('source', 'неизвестно')
@@ -77,11 +68,7 @@ def build_prompt(context: List[Dict[str, Any]], input_data: Dict[str, Any], issu
     return prompt
 
 def generate_draft(context: List[Dict[str, Any]], input_data: Dict[str, Any], issues: List[str] = None) -> str:
-    """
-    Генерирует черновик ТЗ через OpenAI.
-    """
     prompt = build_prompt(context, input_data, issues)
-    
     try:
         response = client.chat.completions.create(
             model=MODEL,
@@ -100,42 +87,27 @@ def generate_draft(context: List[Dict[str, Any]], input_data: Dict[str, Any], is
         return "Ошибка генерации черновика."
 
 def writer_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Узел для LangGraph: принимает state, генерирует draft, сохраняет в state.
-    Учитывает issues из предыдущей валидации.
-    """
     context = state.get("context", [])
-    input_data = state.get("input", {})
+    input_data = {
+        "title": state.get("title", ""),
+        "equipment_type": state.get("equipment_type", ""),
+        "parameters": state.get("parameters", ""),
+        "requirements": state.get("requirements", "")
+    }
     issues = state.get("issues", [])
-    
-    if not input_data:
-        input_data = {
-            "title": state.get("title", ""),
-            "equipment_type": state.get("equipment_type", ""),
-            "parameters": state.get("parameters", ""),
-            "requirements": state.get("requirements", "")
-        }
-    
     draft = generate_draft(context, input_data, issues)
     state["draft"] = draft
-    # Очищаем issues перед следующей валидацией (будут заново получены)
     state["issues"] = []
     return state
 
 if __name__ == "__main__":
     from backend.agents.retriever_agent import retrieve_context
-    
     test_input = {
         "title": "ТЗ на выпрямитель",
         "equipment_type": "выпрямитель полупроводниковый",
         "parameters": "мощность 100 кВт, напряжение 400В",
         "requirements": "соответствие ГОСТ 34.602-2020"
     }
-    print("Получаем контекст...")
-    ctx = retrieve_context(test_input, n_results=5)
-    print(f"Получено {len(ctx)} чанков. Генерируем черновик...")
+    ctx = retrieve_context(test_input)
     draft = generate_draft(ctx, test_input)
-    print("\n" + "="*60)
-    print("ЧЕРНОВИК ТЗ:")
     print(draft)
-    print("="*60)

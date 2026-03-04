@@ -5,11 +5,6 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-"""
-Агент-валидатор: проверяет черновик ТЗ на соответствие ГОСТ 34.602-2020.
-Возвращает список замечаний и флаг passed. Также увеличивает счётчик итераций.
-"""
-
 import os
 import logging
 import json
@@ -22,7 +17,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
-
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY не найден в .env файле")
@@ -31,13 +25,6 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 MODEL = "gpt-4-turbo-preview"
 
 def validate_draft(draft: str) -> Dict[str, Any]:
-    """
-    Проверяет черновик ТЗ и возвращает структурированный результат.
-    Возвращает словарь с ключами:
-      - passed: bool
-      - issues: list[str]
-      - score: int
-    """
     prompt = f"""Ты эксперт-валидатор технических заданий по ГОСТ 34.602-2020.
 Проверь предоставленный черновик ТЗ на соответствие требованиям ГОСТ 34.602-2020.
 
@@ -85,10 +72,6 @@ def validate_draft(draft: str) -> Dict[str, Any]:
         return {"passed": False, "issues": [f"Ошибка валидации: {str(e)}"], "score": 0}
 
 def validator_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Узел для LangGraph: принимает state с draft, возвращает issues и passed.
-    Увеличивает iteration на 1.
-    """
     draft = state.get("draft", "")
     if not draft:
         state["issues"] = ["Черновик пуст"]
@@ -104,15 +87,6 @@ def validator_node(state: Dict[str, Any]) -> Dict[str, Any]:
     return state
 
 if __name__ == "__main__":
-    # Тестовый запуск
-    sample_draft = """
-1. Общие сведения
-Наименование: ТЗ на выпрямитель
-Заказчик: ООО "Пример"
-Основание: договор №123
-
-2. Назначение и цели
-Создание системы питания...
-"""
+    sample_draft = "1. Общие сведения\nНаименование: ТЗ на выпрямитель\nЗаказчик: ООО Пример\nОснование: договор №123"
     result = validate_draft(sample_draft)
     print(json.dumps(result, indent=2, ensure_ascii=False))
