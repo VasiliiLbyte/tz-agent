@@ -37,7 +37,19 @@ def retrieve_context(input_data: Dict[str, Any], n_results: int = 5) -> List[Dic
     return results
 
 def retrieve_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    logger.info(f"retrieve_node получил state с ключами: {list(state.keys())}")
+    # 🔥 ОТЛАДКА: детальный лог входного состояния
+    logger.info(f"=== Вход в retrieve_node ===")
+    logger.info(f"Тип state: {type(state)}")
+    logger.info(f"Ключи state: {list(state.keys())}")
+    # Проверим, есть ли вообще какие-то данные
+    for key in ['title', 'equipment_type', 'parameters', 'requirements']:
+        logger.info(f"state['{key}'] = {state.get(key, 'ОТСУТСТВУЕТ')}")
+    # Попробуем достать через getitem, если это объект, а не словарь
+    try:
+        logger.info(f"state['title'] через getitem: {state['title'] if 'title' in state else 'нет'}")
+    except:
+        logger.info("Не удалось получить через индекс")
+    
     input_data = {
         "title": state.get("title", ""),
         "equipment_type": state.get("equipment_type", ""),
