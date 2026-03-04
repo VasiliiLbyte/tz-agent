@@ -1,0 +1,21 @@
+# Виртуальное окружение
+venv/
+myenv/
+.env
+
+# База данных Chroma
+chroma_db/
+
+# Файлы Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Системные файлы Mac
+.DS_Store
