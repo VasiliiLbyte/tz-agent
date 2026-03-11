@@ -36,16 +36,21 @@ def get_chroma_client():
         )
     return _chroma_client
 
+def collection_exists() -> bool:
+    try:
+        client = get_chroma_client()
+        existing = [c.name for c in client.list_collections()]
+        return COLLECTION_NAME in existing
+    except Exception as e:
+        logger.error(f"Ошибка при проверке коллекции: {e}")
+        return False
+
 def get_collection():
     global _collection
     if _collection is None:
         client = get_chroma_client()
-        try:
-            _collection = client.get_collection(COLLECTION_NAME)
-            logger.info(f"Коллекция {COLLECTION_NAME} загружена")
-        except Exception as e:
-            logger.error(f"Не удалось получить коллекцию {COLLECTION_NAME}: {e}")
-            raise
+        _collection = client.get_collection(COLLECTION_NAME)
+        logger.info(f"Коллекция {COLLECTION_NAME} загружена")
     return _collection
 
 def get_embed_model():
@@ -55,6 +60,9 @@ def get_embed_model():
     return _embed_model
 
 def search(query: str, n_results: int = 5) -> List[Dict[str, Any]]:
+    if not collection_exists():
+        logger.warning("Коллекция не найдена — библиотека пуста. Запустите index_library.py для индексации документов.")
+        return []
     try:
         collection = get_collection()
         embed_model = get_embed_model()

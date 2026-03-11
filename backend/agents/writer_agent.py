@@ -7,107 +7,150 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import os
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, AsyncGenerator
 
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 from dotenv import load_dotenv
 
-logging.basicConfig(level=logging.INFO)
+load_dotenv()
 logger = logging.getLogger(__name__)
 
-load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY не найден в .env файле")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
 MODEL = "gpt-4-turbo-preview"
 
-def build_prompt(context: List[Dict[str, Any]], input_data: Dict[str, Any], issues: List[str] = None) -> str:
+DEFAULT_SECTIONS = [
+    "1. Общие сведения об объекте",
+    "2. Назначение и цели",
+    "3. Технические характеристики и параметры",
+    "4. Требования к объекту",
+    "5. Требования к надёжности и безопасности",
+    "6. Требования к документации",
+    "7. Порядок приёмки и контроля",
+    "8. Источники разработки",
+]
+
+
+def build_universal_prompt(
+    context_chunks: List[Dict[str, Any]],
+    form: Dict[str, Any],
+    issues: List[str] = None,
+) -> str:
     context_text = ""
-    for i, chunk in enumerate(context, 1):
-        source = chunk['metadata'].get('source', 'неизвестно')
-        context_text += f"\n--- Источник {i}: {source} ---\n"
-        context_text += chunk['text'] + "\n"
-    
-    title = input_data.get("title", "Техническое задание")
-    equipment_type = input_data.get("equipment_type", "не указано")
-    parameters = input_data.get("parameters", "не указаны")
-    requirements = input_data.get("requirements", "не указаны")
-    
-    issues_text = ""
+    for i, chunk in enumerate(context_chunks, 1):
+        src = chunk["metadata"].get("source", "неизвестно")
+        std = chunk["metadata"].get("standard_id", "")
+        context_text += f"\n--- [{i}] {src} {f'({std})' if std else ''} ---\n{chunk['text']}\n"
+
+    user_standards = form.get("standards") or []
+    rag_standards = list({
+        c["metadata"].get("standard_id")
+        for c in context_chunks
+        if c["metadata"].get("standard_id")
+    })
+    all_standards = user_standards or rag_standards
+    standards_line = (
+        "Применимые стандарты: " + ", ".join(all_standards)
+        if all_standards
+        else "Применимые стандарты: определяются по контексту"
+    )
+
+    issues_block = ""
     if issues:
-        issues_text = "Предыдущие замечания, которые нужно исправить:\n" + "\n".join(f"- {issue}" for issue in issues)
-    
-    prompt = f"""Ты эксперт по написанию технических заданий (ТЗ) на промышленное оборудование, особенно выпрямители и силовую электронику. Твоя задача — составить черновик ТЗ в соответствии с ГОСТ 34.602-2020, используя ТОЛЬКО предоставленный ниже контекст из библиотеки документов. Не придумывай информацию, которой нет в контексте. Если в контексте недостаточно данных, напиши разделы с пометкой "Требуется уточнение".
+        issues_block = "\n\nЗАМЕЧАНИЯ к предыдущей версии (исправь обязательно):\n"
+        issues_block += "\n".join(f"  - {i}" for i in issues)
 
-Ниже представлены фрагменты из библиотеки:
+    sections = "\n".join(DEFAULT_SECTIONS)
 
-{context_text}
+    return f"""Ты эксперт по техническим заданиям. Составь черновик ТЗ, используя ТОЛЬКО информацию из предоставленного контекста стандартов. Если данных недостаточно — пиши «Требуется уточнение».
 
-Теперь данные от пользователя:
-- Название ТЗ: {title}
-- Тип оборудования: {equipment_type}
-- Технические параметры: {parameters}
-- Дополнительные требования: {requirements}
+КОНТЕКСТ ИЗ БАЗЫ СТАНДАРТОВ:
+{context_text or "Контекст не найден. Используй общие принципы составления ТЗ."}
 
-{issues_text}
+ДАННЫЕ ОТ ПОЛЬЗОВАТЕЛЯ:
+- Тип объекта: {form.get("object_type") or form.get("equipment_type", "не указан")}
+- Описание: {form.get("description") or form.get("title", "не указано")}
+- Технические параметры: {form.get("parameters", "не указаны")}
+- Отрасль: {form.get("industry", "не указана")}
+- Дополнительные требования: {form.get("extra_requirements") or form.get("requirements", "отсутствуют")}
+- {standards_line}
+{issues_block}
 
-Составь черновик ТЗ, следуя структуре ГОСТ 34.602-2020. Разделы должны включать:
-1. Общие сведения
-2. Назначение и цели создания системы
-3. Характеристика объекта автоматизации
-4. Требования к системе
-5. Состав и содержание работ по созданию системы
-6. Порядок контроля и приёмки
-7. Требования к документированию
-8. Источники разработки
+Структура ТЗ (разделы):
+{sections}
 
-Используй данные из контекста для заполнения разделов. Если были замечания, обязательно исправь их в новой версии. Пиши на русском языке, техническим стилем.
+Пиши на русском, техническим стилем. Каждый раздел начинай с новой строки и заголовка.
 """
-    return prompt
 
-def generate_draft(context: List[Dict[str, Any]], input_data: Dict[str, Any], issues: List[str] = None) -> str:
-    prompt = build_prompt(context, input_data, issues)
+
+async def stream_draft(
+    context_chunks: List[Dict[str, Any]],
+    form: Dict[str, Any],
+    issues: List[str] = None,
+) -> AsyncGenerator[str, None]:
+    """Async generator: стримит токены напрямую из OpenAI."""
+    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    prompt = build_universal_prompt(context_chunks, form, issues)
     try:
-        response = client.chat.completions.create(
+        stream = await client.chat.completions.create(
             model=MODEL,
             messages=[
-                {"role": "system", "content": "Ты эксперт по написанию технических заданий по ГОСТ."},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": "Ты эксперт по техническим заданиям."},
+                {"role": "user", "content": prompt},
             ],
             temperature=0.3,
             max_tokens=4000,
+            stream=True,
         )
-        draft = response.choices[0].message.content
-        logger.info("Черновик успешно сгенерирован")
-        return draft
+        async for chunk in stream:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
     except Exception as e:
-        logger.error(f"Ошибка при генерации черновика: {e}")
-        return "Ошибка генерации черновика."
+        logger.error(f"Ошибка стриминга: {e}")
+        yield f"\n\n[ОШИБКА ГЕНЕРАЦИИ: {e}]"
+
 
 def writer_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    context = state.get("context", [])
-    input_data = {
-        "title": state.get("title", ""),
-        "equipment_type": state.get("equipment_type", ""),
+    """Синхронный node для LangGraph workflow — обратная совместимость."""
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+    # Поддержка как старых ключей (equipment_type/title), так и новых (object_type/description)
+    form = {
+        "object_type": state.get("object_type") or state.get("equipment_type", ""),
+        "description": state.get("description") or state.get("title", ""),
         "parameters": state.get("parameters", ""),
-        "requirements": state.get("requirements", "")
+        "standards": state.get("standards", []),
+        "industry": state.get("industry", ""),
+        "extra_requirements": state.get("extra_requirements") or state.get("requirements", ""),
     }
-    issues = state.get("issues", [])
-    draft = generate_draft(context, input_data, issues)
-    state["draft"] = draft
+
+    prompt = build_universal_prompt(state.get("context", []), form, state.get("issues"))
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": "Ты эксперт по техническим заданиям."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.3,
+        max_tokens=4000,
+    )
+    state["draft"] = response.choices[0].message.content
     state["issues"] = []
     return state
 
+
 if __name__ == "__main__":
-    from backend.agents.retriever_agent import retrieve_context
-    test_input = {
-        "title": "ТЗ на выпрямитель",
-        "equipment_type": "выпрямитель полупроводниковый",
-        "parameters": "мощность 100 кВт, напряжение 400В",
-        "requirements": "соответствие ГОСТ 34.602-2020"
+    from backend.rag.retriever import search
+    test_form = {
+        "object_type": "насос центробежный",
+        "description": "насос для систем водоснабжения",
+        "parameters": "Q=50 м3/ч, H=40 м",
+        "requirements": "",
     }
-    ctx = retrieve_context(test_input)
-    draft = generate_draft(ctx, test_input)
-    print(draft)
+    ctx = search(f"{test_form['object_type']} {test_form['description']}", n_results=5)
+    import asyncio
+
+    async def _test():
+        async for token in stream_draft(ctx, test_form):
+            print(token, end="", flush=True)
+
+    asyncio.run(_test())

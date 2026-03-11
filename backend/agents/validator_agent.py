@@ -21,8 +21,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY не найден в .env файле")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
-MODEL = "gpt-4-turbo-preview"
+client = OpenAI(api_key=OPENAI_API_KEY, timeout=120.0, max_retries=1)
+MODEL = "gpt-4o-mini"
 
 def validate_draft(draft: str) -> Dict[str, Any]:
     prompt = f"""Ты эксперт-валидатор технических заданий по ГОСТ 34.602-2020.

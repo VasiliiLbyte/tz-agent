@@ -34,7 +34,7 @@ class WorkflowState(TypedDict):
 def should_continue(state: WorkflowState) -> Literal["writer", "quality"]:
     issues = state.get("issues", [])
     iteration = state.get("iteration", 0)
-    max_iterations = 3
+    max_iterations = 1
     if issues and iteration < max_iterations:
         logger.info(f"Замечания есть ({len(issues)}), итерация {iteration+1}/{max_iterations} -> возврат к writer")
         return "writer"

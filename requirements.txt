@@ -1,0 +1,16 @@
+# Существующие (из проекта)
+fastapi
+uvicorn[standard]
+openai
+langchain
+langgraph
+llama-index
+llama-index-embeddings-openai
+chromadb
+python-dotenv
+
+# Добавляем
+python-docx          # экспорт .docx
+weasyprint           # экспорт .pdf
+pydantic-settings    # конфиг через env
+httpx                # для async тестов
