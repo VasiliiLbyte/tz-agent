@@ -21,8 +21,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY не найден в .env файле")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
-MODEL = "gpt-4-turbo-preview"
+client = OpenAI(api_key=OPENAI_API_KEY, timeout=120.0, max_retries=1)
+MODEL = "gpt-4o-mini"
 
 def quality_check(draft: str, issues: list) -> Dict[str, Any]:
     prompt = f"""Ты финальный редактор технических заданий. У тебя есть черновик ТЗ и список замечаний от валидатора.
@@ -53,7 +53,7 @@ def quality_check(draft: str, issues: list) -> Dict[str, Any]:
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3,
-            max_tokens=4000,
+            max_tokens=2000,
             response_format={"type": "json_object"}
         )
         content = response.choices[0].message.content
