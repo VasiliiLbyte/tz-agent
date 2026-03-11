@@ -53,24 +53,15 @@ async def generate_tz_legacy(request: LegacyTZRequest):
 # ── Новый streaming эндпоинт ─────────────────────────────────────────────────
 
 async def tz_stream_generator(form: TZFormRequest) -> AsyncGenerator[str, None]:
-    """
-    SSE-генератор: сначала отдаём найденные стандарты,
-    затем стримим черновик токен за токеном.
-    """
-    # 1. RAG-поиск по базе стандартов
     query = f"{form.object_type} {form.description} {form.industry or ''}"
     context_chunks = search(query, n_results=8)
 
-    # Если пользователь указал свои стандарты — добавляем их в метаданные
-    # (предполагаем, что в ChromaDB можно фильтровать по standard_id)
     if form.standards:
         for std_id in form.standards:
             extra = search(std_id, n_results=3)
-            # дедупликация по тексту
             existing_texts = {c["text"] for c in context_chunks}
             context_chunks += [c for c in extra if c["text"] not in existing_texts]
 
-    # Отдаём список найденных стандартов клиенту
     found_standards = list({
         c["metadata"].get("standard_id")
         for c in context_chunks
@@ -78,15 +69,19 @@ async def tz_stream_generator(form: TZFormRequest) -> AsyncGenerator[str, None]:
     })
     yield f"data: {json.dumps({'type': 'standards_found', 'standards': found_standards}, ensure_ascii=False)}\n\n"
 
-    # 2. Стримим генерацию черновика
     form_dict = form.model_dump()
     yield f"data: {json.dumps({'type': 'generation_start'}, ensure_ascii=False)}\n\n"
 
-    async for token in stream_draft(context_chunks, form_dict):
+    # ✅ собираем весь текст из async generator через вспомогательную функцию
+    full_text = []
+    gen = stream_draft(context_chunks, form_dict)
+    async for token in gen:
+        full_text.append(token)
         payload = json.dumps({"type": "token", "text": token}, ensure_ascii=False)
         yield f"data: {payload}\n\n"
 
     yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+
 
 
 @router.post("/generate-tz")

@@ -86,7 +86,6 @@ async def stream_draft(
     form: Dict[str, Any],
     issues: List[str] = None,
 ) -> AsyncGenerator[str, None]:
-    """Async generator: стримит токены напрямую из OpenAI."""
     client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     prompt = build_universal_prompt(context_chunks, form, issues)
     try:
@@ -107,6 +106,8 @@ async def stream_draft(
     except Exception as e:
         logger.error(f"Ошибка стриминга: {e}")
         yield f"\n\n[ОШИБКА ГЕНЕРАЦИИ: {e}]"
+
+
 
 
 def writer_node(state: Dict[str, Any]) -> Dict[str, Any]:
