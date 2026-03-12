@@ -52,11 +52,11 @@ def _base_description(form: Dict[str, Any]) -> str:
 
 def _keywords(form: Dict[str, Any]) -> List[str]:
     text = " ".join([
-        _base_object(form),
-        _base_description(form),
-        form.get("industry", ""),
-        form.get("parameters", ""),
-        form.get("extra_requirements") or form.get("requirements", ""),
+        _base_object(form) or "",
+        _base_description(form) or "",
+        form.get("industry") or "",
+        form.get("parameters") or "",
+        form.get("extra_requirements") or form.get("requirements") or "",
     ])
     words = re.findall(r"[A-Za-zА-Яа-я0-9]+", text.lower())
     stop = {
