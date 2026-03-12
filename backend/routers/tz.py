@@ -168,10 +168,11 @@ async def clarify_request(request: TZFormRequest):
     )
     
         try:
-        raw = json.loads(...)
+        raw = json.loads(response.choices[0].message.content)
         questions = raw if isinstance(raw, list) else raw.get("questions", [])
     except Exception:
         questions = ["Уточните основные технические требования к объекту."]
+
 
     # ← 4 пробела, на уровне try/except, НЕ внутри except
     resolved = await resolve_standards_async(
