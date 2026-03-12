@@ -167,7 +167,7 @@ async def clarify_request(request: TZFormRequest):
         response_format={"type": "json_object"},
     )
     
-        try:
+    try:
         raw = json.loads(response.choices[0].message.content)
         questions = raw if isinstance(raw, list) else raw.get("questions", [])
     except Exception:
