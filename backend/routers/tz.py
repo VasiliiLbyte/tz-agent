@@ -15,6 +15,8 @@ from backend.schemas.tz_schemas import TZFormRequest, ClarifyResponse
 from backend.rag.retriever import search
 from backend.agents.writer_agent import stream_draft
 from backend.workflows.tz_workflow import run_workflow
+from backend.agents.web_standards_agent import resolve_standards_async
+
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -62,25 +64,44 @@ async def tz_stream_generator(form: TZFormRequest) -> AsyncGenerator[str, None]:
             existing_texts = {c["text"] for c in context_chunks}
             context_chunks += [c for c in extra if c["text"] not in existing_texts]
 
-    found_standards = list({
+    local_found_standards = list({
         c["metadata"].get("standard_id")
         for c in context_chunks
         if c["metadata"].get("standard_id")
     })
-    yield f"data: {json.dumps({'type': 'standards_found', 'standards': found_standards}, ensure_ascii=False)}\n\n"
+
+    resolved = await resolve_standards_async(
+        form=form.model_dump(),
+        local_standards=local_found_standards + (form.standards or []),
+    )
+
+    yield f"data: {json.dumps({
+        'type': 'standards_found',
+        'local_standards': local_found_standards,
+        'resolved_standards': resolved['resolved_standards'],
+        'items': resolved['resolved_items'],
+    }, ensure_ascii=False)}\n\n"
+
+    if resolved["source_links"]:
+        yield f"data: {json.dumps({
+            'type': 'reference_sources',
+            'sources': resolved['source_links'],
+        }, ensure_ascii=False)}\n\n"
 
     form_dict = form.model_dump()
+    form_dict["resolved_standards"] = resolved["resolved_standards"]
+    form_dict["standards_catalog"] = resolved["resolved_items"]
+    form_dict["reference_sources"] = resolved["source_links"]
+
     yield f"data: {json.dumps({'type': 'generation_start'}, ensure_ascii=False)}\n\n"
 
-    # ✅ собираем весь текст из async generator через вспомогательную функцию
-    full_text = []
     gen = stream_draft(context_chunks, form_dict)
     async for token in gen:
-        full_text.append(token)
         payload = json.dumps({"type": "token", "text": token}, ensure_ascii=False)
         yield f"data: {payload}\n\n"
 
     yield f"data: {json.dumps({'type': 'done'}, ensure_ascii=False)}\n\n"
+
 
 
 
@@ -121,10 +142,10 @@ async def clarify_request(request: TZFormRequest):
 
     ai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-    # RAG для подбора стандартов
+      # RAG для подбора стандартов
     query = f"{request.object_type} {request.description} {request.industry or ''}"
     context_chunks = search(query, n_results=5)
-    suggested = list({
+    local_suggested = list({          # ← переименовали suggested → local_suggested
         c["metadata"].get("standard_id")
         for c in context_chunks
         if c["metadata"].get("standard_id")
@@ -153,7 +174,14 @@ async def clarify_request(request: TZFormRequest):
     except Exception:
         questions = ["Уточните основные технические требования к объекту."]
 
-    return ClarifyResponse(questions=questions, suggested_standards=suggested)
+        resolved = await resolve_standards_async(
+        form=request.model_dump(),
+        local_standards=local_suggested,
+   )
+    return ClarifyResponse(
+        questions=questions,
+        suggested_standards=resolved["resolved_standards"] or local_suggested
+    )
 
 
 # ── Approve (заглушка из оригинала) ──────────────────────────────────────────
