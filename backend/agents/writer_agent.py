@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-MODEL = "gpt-4-turbo-preview"
+MODEL = "gpt-4o"
 
 DEFAULT_SECTIONS = [
     "1. Общие сведения об объекте",
@@ -148,7 +148,7 @@ def build_universal_prompt(
 - Класс защиты по электробезопасности (I, II или III)
 - Степень защиты оболочки IP (конкретно)
 - Требования по пожарной безопасности
-- Требования к заземлению и зануления
+- Требования к заземлению и занулению
 
 Раздел 7 (Документация):
 - Полный перечень КД и ЭД с обозначениями по ЕСКД
@@ -180,7 +180,7 @@ async def stream_draft(
                 {"role": "user", "content": prompt},
             ],
             temperature=0.3,
-            max_tokens=8000,
+            max_tokens=4096,
             stream=True,
         )
         async for chunk in stream:
@@ -216,7 +216,7 @@ def writer_node(state: Dict[str, Any]) -> Dict[str, Any]:
             {"role": "user", "content": prompt},
         ],
         temperature=0.3,
-        max_tokens=8000,
+        max_tokens=4096,
     )
     state["draft"] = response.choices[0].message.content
     state["issues"] = []
