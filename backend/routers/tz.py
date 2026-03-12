@@ -167,21 +167,22 @@ async def clarify_request(request: TZFormRequest):
         response_format={"type": "json_object"},
     )
     
-    try:
-        raw = json.loads(response.choices[0].message.content)
-        # GPT может вернуть {"questions": [...]} или просто [...]
+        try:
+        raw = json.loads(...)
         questions = raw if isinstance(raw, list) else raw.get("questions", [])
     except Exception:
         questions = ["Уточните основные технические требования к объекту."]
 
-        resolved = await resolve_standards_async(
+    # ← 4 пробела, на уровне try/except, НЕ внутри except
+    resolved = await resolve_standards_async(
         form=request.model_dump(),
         local_standards=local_suggested,
-   )
+    )
     return ClarifyResponse(
         questions=questions,
         suggested_standards=resolved["resolved_standards"] or local_suggested
     )
+
 
 
 # ── Approve (заглушка из оригинала) ──────────────────────────────────────────

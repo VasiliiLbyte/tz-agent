@@ -156,16 +156,16 @@ def writer_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
     # Поддержка как старых ключей (equipment_type/title), так и новых (object_type/description)
     form = {
-    "object_type": state.get("object_type") or state.get("equipment_type", ""),
-    "description": state.get("description") or state.get("title", ""),
-    "parameters": state.get("parameters", ""),
-    "standards": state.get("standards", []),
-    "industry": state.get("industry", ""),
-    "extra_requirements": state.get("extra_requirements") or state.get("requirements", ""),
-    "resolved_standards": state.get("resolved_standards", []),
-    "standards_catalog": state.get("standards_catalog", []),
-    "reference_sources": state.get("reference_sources", []),
-}
+        "object_type": state.get("object_type") or state.get("equipment_type", ""),
+        "description": state.get("description") or state.get("title", ""),
+        "parameters": state.get("parameters", ""),
+        "standards": state.get("standards", []),
+        "industry": state.get("industry", ""),
+        "extra_requirements": state.get("extra_requirements") or state.get("requirements", ""),
+        "resolved_standards": state.get("resolved_standards", []),
+        "standards_catalog": state.get("standards_catalog", []),
+        "reference_sources": state.get("reference_sources", []),
+    }
 
 
     prompt = build_universal_prompt(state.get("context", []), form, state.get("issues"))
