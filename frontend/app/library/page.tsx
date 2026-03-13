@@ -25,14 +25,26 @@ interface SearchCandidate {
   already_indexed: boolean;
   filename: string;
   score: number;
+  relevance_pct: number;
 }
 
 const API = 'http://localhost:8000/api/library';
 
+function RelevanceBadge({ pct }: { pct: number }) {
+  const color =
+    pct >= 75 ? 'bg-green-900/60 text-green-300 border-green-700'
+    : pct >= 50 ? 'bg-yellow-900/60 text-yellow-300 border-yellow-700'
+    : 'bg-gray-800 text-gray-400 border-gray-600';
+  return (
+    <span className={`text-xs font-semibold px-2 py-0.5 rounded border ${color}`}>
+      {pct}%
+    </span>
+  );
+}
+
 export default function LibraryPage() {
   const [tab, setTab] = useState<'library' | 'search'>('library');
 
-  // Library
   const [documents, setDocuments] = useState<DocumentInfo[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadResult, setUploadResult] = useState<string | null>(null);
@@ -42,11 +54,9 @@ export default function LibraryPage() {
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Full text modal
   const [textModal, setTextModal] = useState<{ filename: string; text: string } | null>(null);
   const [loadingText, setLoadingText] = useState<string | null>(null);
 
-  // Search
   const [searchQuery, setSearchQuery] = useState('');
   const [searching, setSearching] = useState(false);
   const [candidates, setCandidates] = useState<SearchCandidate[]>([]);
@@ -65,22 +75,16 @@ export default function LibraryPage() {
   };
 
   const handleUpload = async (file: File) => {
-    setUploading(true);
-    setUploadResult(null);
+    setUploading(true); setUploadResult(null);
     const formData = new FormData();
     formData.append('file', file);
     try {
       const res = await fetch(`${API}/upload`, { method: 'POST', body: formData });
       const data = await res.json();
-      setUploadResult(res.ok
-        ? `✅ ${data.filename} — ${data.chunks_added} чанков добавлено`
-        : `❌ ${data.detail}`);
+      setUploadResult(res.ok ? `✅ ${data.filename} — ${data.chunks_added} чанков` : `❌ ${data.detail}`);
       if (res.ok) loadDocuments();
-    } catch (e: any) {
-      setUploadResult(`❌ ${e.message}`);
-    } finally {
-      setUploading(false);
-    }
+    } catch (e: any) { setUploadResult(`❌ ${e.message}`); }
+    finally { setUploading(false); }
   };
 
   const handleDrop = (e: React.DragEvent) => {
@@ -91,8 +95,7 @@ export default function LibraryPage() {
 
   const loadPreview = async (filename: string) => {
     if (previewFile === filename) { setPreviewFile(null); return; }
-    setPreviewFile(filename);
-    setLoadingPreview(true);
+    setPreviewFile(filename); setLoadingPreview(true);
     try {
       const res = await fetch(`${API}/preview?filename=${encodeURIComponent(filename)}&limit=5`);
       setChunks(await res.json());
@@ -105,33 +108,24 @@ export default function LibraryPage() {
     try {
       const res = await fetch(`${API}/text?filename=${encodeURIComponent(filename)}`);
       const data = await res.json();
-      if (res.ok) {
-        setTextModal({ filename, text: data.text });
-      } else {
-        alert(`Ошибка: ${data.detail}`);
-      }
-    } catch (e: any) {
-      alert(e.message);
-    } finally {
-      setLoadingText(null);
-    }
+      if (res.ok) setTextModal({ filename, text: data.text });
+      else alert(`Ошибка: ${data.detail}`);
+    } catch (e: any) { alert(e.message); }
+    finally { setLoadingText(null); }
   };
 
   const handleDelete = async (filename: string) => {
     if (!confirm(`Удалить «${filename}»?`)) return;
     await fetch(`${API}/documents/${encodeURIComponent(filename)}`, { method: 'DELETE' });
-    setPreviewFile(null);
-    loadDocuments();
+    setPreviewFile(null); loadDocuments();
   };
 
-  // Search
   const handleSearch = async () => {
     if (!searchQuery.trim()) return;
     setSearching(true); setCandidates([]); setSelected(new Set()); setApproveResults([]); setSearchError(null);
     try {
       const res = await fetch(`${API}/search`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: searchQuery }),
       });
       const data = await res.json();
@@ -152,8 +146,7 @@ export default function LibraryPage() {
     for (const c of toApprove) {
       try {
         const res = await fetch(`${API}/approve`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ url: c.url, filename: c.filename }),
         });
         const data = await res.json();
@@ -172,7 +165,6 @@ export default function LibraryPage() {
           <p className="text-gray-400 text-sm mt-1">ГОСТы, ТЗ-аналоги, паспорта — используются при генерации ТЗ</p>
         </div>
 
-        {/* Tabs */}
         <div className="flex gap-2 border-b border-gray-700">
           {(['library', 'search'] as const).map(t => (
             <button key={t} onClick={() => setTab(t)}
@@ -184,10 +176,8 @@ export default function LibraryPage() {
           ))}
         </div>
 
-        {/* Library tab */}
         {tab === 'library' && (
           <div className="space-y-5">
-            {/* Drop zone */}
             <div
               onDragOver={e => { e.preventDefault(); setDragOver(true); }}
               onDragLeave={() => setDragOver(false)}
@@ -198,13 +188,12 @@ export default function LibraryPage() {
               }`}>
               <input ref={fileInputRef} type="file" accept=".pdf,.docx,.txt,.md"
                 className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleUpload(f); }} />
-              {uploading ? (
-                <p className="text-blue-400">⏳ Загрузка и индексация... (скан PDF может занять 1–2 минуты)</p>
-              ) : (
-                <><p className="text-4xl mb-2">📄</p>
+              {uploading
+                ? <p className="text-blue-400">⏳ Индексация... (скан PDF может занять 1–2 минуты)</p>
+                : (<><p className="text-4xl mb-2">📄</p>
                   <p className="text-gray-300">Перетащите файл или нажмите для выбора</p>
-                  <p className="text-gray-500 text-sm mt-1">PDF, DOCX, TXT, MD — до 20 МБ</p></>
-              )}
+                  <p className="text-gray-500 text-sm mt-1">PDF, DOCX, TXT, MD — до 20 МБ</p></>)
+              }
             </div>
 
             {uploadResult && (
@@ -227,8 +216,7 @@ export default function LibraryPage() {
                         </div>
                       </div>
                       <div className="flex gap-2">
-                        <button onClick={() => openFullText(doc.filename)}
-                          disabled={loadingText === doc.filename}
+                        <button onClick={() => openFullText(doc.filename)} disabled={loadingText === doc.filename}
                           className="text-xs px-3 py-1.5 bg-indigo-900/50 hover:bg-indigo-800 text-indigo-300 rounded-lg transition disabled:opacity-50">
                           {loadingText === doc.filename ? '⏳' : '📝'} Текст
                         </button>
@@ -245,12 +233,12 @@ export default function LibraryPage() {
                     {previewFile === doc.filename && (
                       <div className="border-t border-gray-700 p-4 space-y-2">
                         {loadingPreview ? <p className="text-sm text-gray-400">Загрузка...</p>
-                          : chunks.length > 0 ? chunks.map(chunk => (
+                          : chunks.map(chunk => (
                             <div key={chunk.chunk_index} className="bg-gray-700/50 rounded-lg p-3">
                               <p className="text-xs text-gray-500 mb-1">Чанк #{chunk.chunk_index}</p>
                               <p className="text-xs text-gray-300 leading-relaxed">{chunk.text}…</p>
                             </div>
-                          )) : <p className="text-sm text-gray-500">Чанки не найдены</p>}
+                          ))}
                       </div>
                     )}
                   </div>
@@ -265,7 +253,6 @@ export default function LibraryPage() {
           </div>
         )}
 
-        {/* Search tab */}
         {tab === 'search' && (
           <div className="space-y-5">
             <div className="flex gap-3">
@@ -285,7 +272,9 @@ export default function LibraryPage() {
             {candidates.length > 0 && (
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
-                  <p className="text-sm text-gray-400">Найдено: {candidates.length}. Отметьте нужные.</p>
+                  <p className="text-sm text-gray-400">
+                    Найдено: {candidates.length} уникальных документов
+                  </p>
                   <button onClick={handleApprove} disabled={approving || selected.size === 0}
                     className="px-5 py-2 bg-green-700 hover:bg-green-600 disabled:opacity-40 rounded-xl text-sm font-medium transition">
                     {approving ? '⏳ Добавляю...' : `➕ Добавить (${selected.size})`}
@@ -303,7 +292,8 @@ export default function LibraryPage() {
                 )}
 
                 {candidates.map(c => (
-                  <div key={c.url} onClick={() => !c.already_indexed && toggleSelect(c.url)}
+                  <div key={c.url}
+                    onClick={() => !c.already_indexed && toggleSelect(c.url)}
                     className={`rounded-xl p-4 border transition cursor-pointer ${
                       c.already_indexed ? 'border-gray-700 bg-gray-800/40 opacity-60 cursor-default'
                         : selected.has(c.url) ? 'border-blue-500 bg-blue-900/20'
@@ -318,10 +308,11 @@ export default function LibraryPage() {
                       )}
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <p className="text-sm font-medium truncate">{c.title}</p>
+                          <p className="text-sm font-medium truncate flex-1">{c.title}</p>
+                          <RelevanceBadge pct={c.relevance_pct} />
                           {c.is_direct_pdf && <span className="text-xs bg-blue-900/50 text-blue-300 px-2 py-0.5 rounded">PDF</span>}
-                          {c.is_priority_source && <span className="text-xs bg-green-900/50 text-green-300 px-2 py-0.5 rounded">★ Приоритет</span>}
-                          {c.already_indexed && <span className="text-xs bg-gray-700 text-gray-400 px-2 py-0.5 rounded">✓ Уже в базе</span>}
+                          {c.is_priority_source && <span className="text-xs bg-green-900/50 text-green-300 px-2 py-0.5 rounded">★</span>}
+                          {c.already_indexed && <span className="text-xs bg-gray-700 text-gray-400 px-2 py-0.5 rounded">✓ В базе</span>}
                         </div>
                         <p className="text-xs text-gray-500 mt-0.5">{c.source_domain}</p>
                         {c.snippet && <p className="text-xs text-gray-400 mt-1 line-clamp-2">{c.snippet}</p>}
@@ -347,7 +338,6 @@ export default function LibraryPage() {
         )}
       </div>
 
-      {/* Full text modal */}
       {textModal && (
         <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4"
           onClick={() => setTextModal(null)}>
@@ -356,11 +346,10 @@ export default function LibraryPage() {
             <div className="flex items-center justify-between p-5 border-b border-gray-700">
               <div>
                 <h2 className="font-semibold">📝 {textModal.filename}</h2>
-                <p className="text-xs text-gray-500 mt-0.5">Полный извлечённый текст · {textModal.text.length.toLocaleString()} символов</p>
+                <p className="text-xs text-gray-500 mt-0.5">{textModal.text.length.toLocaleString()} символов</p>
               </div>
               <div className="flex gap-2">
-                <button
-                  onClick={() => navigator.clipboard.writeText(textModal.text)}
+                <button onClick={() => navigator.clipboard.writeText(textModal.text)}
                   className="text-xs px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition">
                   📋 Копировать
                 </button>
