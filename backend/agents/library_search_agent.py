@@ -6,6 +6,7 @@
 
 import os
 import re
+import ssl
 import logging
 import hashlib
 from typing import List, Dict, Any
@@ -20,7 +21,6 @@ logger = logging.getLogger(__name__)
 TAVILY_URL = "https://api.tavily.com/search"
 MAX_RESULTS = 10
 
-# Домены с высокой вероятностью прямых PDF-ссылок на нормативные документы
 PRIORITY_DOMAINS = (
     "docs.cntd.ru",
     "protect.gost.ru",
@@ -31,15 +31,12 @@ PRIORITY_DOMAINS = (
     "gost.ru",
 )
 
-# Паттерн для обнаружения прямых ссылок на скачиваемые файлы
 DOWNLOAD_PATTERN = re.compile(r'\.pdf|\.docx|\.doc', re.IGNORECASE)
 
-
-def _is_likely_document_url(url: str) -> bool:
-    """True если ссылка ведёт напрямую на файл или на страницу документа."""
-    if DOWNLOAD_PATTERN.search(url):
-        return True
-    return any(domain in url for domain in PRIORITY_DOMAINS)
+# SSL-контекст без проверки сертификата (нужно для macOS где не установлены корневые сертификаты Python)
+_SSL_CONTEXT = ssl.create_default_context()
+_SSL_CONTEXT.check_hostname = False
+_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
 
 
 def _deduplicate_by_url(candidates: List[Dict]) -> List[Dict]:
@@ -69,20 +66,11 @@ async def search_documents_for_library(
     query: str,
     chroma_collection=None,
 ) -> List[Dict[str, Any]]:
-    """
-    Ищет документы по запросу через Tavily.
-    Возвращает список кандидатов:
-      {
-        title, url, snippet, source_domain,
-        is_direct_pdf, already_indexed
-      }
-    """
     api_key = os.getenv("TAVILY_API_KEY")
     if not api_key:
         logger.warning("TAVILY_API_KEY не задан")
         return []
 
-    # Добавляем контекст для поиска нормативных документов
     enriched_query = f"{query} ГОСТ норматив PDF скачать"
 
     payload = {
@@ -96,7 +84,7 @@ async def search_documents_for_library(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
             response = await client.post(TAVILY_URL, json=payload)
             response.raise_for_status()
             results = response.json().get("results", [])
@@ -113,17 +101,14 @@ async def search_documents_for_library(
         is_pdf = bool(DOWNLOAD_PATTERN.search(url))
         is_priority = any(d in url for d in PRIORITY_DOMAINS)
 
-        # Пропускаем совсем нерелевантные (без domain и без PDF)
         if not url:
             continue
 
-        # Имя файла для проверки дублей
         filename = url.split("/")[-1].split("?")[0] or ""
         already_indexed = False
         if chroma_collection and filename:
             already_indexed = _check_already_indexed(filename, chroma_collection)
 
-        # Скор релевантности
         score = 0
         if is_pdf:
             score += 3
@@ -144,7 +129,6 @@ async def search_documents_for_library(
             "score": score,
         })
 
-    # Сортируем: сначала прямые PDF из приоритетных доменов
     candidates.sort(key=lambda x: x["score"], reverse=True)
     return _deduplicate_by_url(candidates)
 
@@ -158,19 +142,15 @@ async def download_and_index(
     chunk_fn,
     extract_fn,
 ) -> Dict[str, Any]:
-    """
-    Скачивает файл по URL, извлекает текст, индексирует в ChromaDB.
-    Возвращает результат индексации.
-    """
     suffix = Path(filename).suffix.lower()
     if suffix not in {".pdf", ".docx", ".txt", ".md"}:
         return {"status": "error", "detail": f"Неподдерживаемый формат: {suffix}"}
 
     save_path = library_root / filename
 
-    # Скачиваем
+    # Скачиваем с отключённой проверкой SSL (решение для macOS)
     try:
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True, verify=False) as client:
             response = await client.get(url)
             response.raise_for_status()
             content = response.content
@@ -180,16 +160,20 @@ async def download_and_index(
     if len(content) > 20 * 1024 * 1024:
         return {"status": "error", "detail": "Файл превышает 20 МБ"}
 
+    # Проверяем что это действительно файл, а не HTML-страница
+    content_type = response.headers.get("content-type", "")
+    if "text/html" in content_type and suffix == ".pdf":
+        save_path.unlink(missing_ok=True) if save_path.exists() else None
+        return {"status": "error", "detail": "Сайт вернул HTML вместо PDF — прямая ссылка недоступна"}
+
     with open(save_path, "wb") as f:
         f.write(content)
 
-    # Извлекаем текст
     text = extract_fn(save_path, suffix)
     if not text.strip():
         save_path.unlink(missing_ok=True)
-        return {"status": "error", "detail": "Не удалось извлечь текст"}
+        return {"status": "error", "detail": "Не удалось извлечь текст (файл пустой или защищён паролем)"}
 
-    # Чанкуем и индексируем
     chunks = chunk_fn(text)
     file_hash = hashlib.md5(content).hexdigest()
     source_path = f"library/uploads/{filename}"
