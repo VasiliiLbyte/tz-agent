@@ -67,25 +67,70 @@ def chunk_text(text: str, chunk_size: int = 800, overlap: int = 150) -> List[str
     return chunks
 
 
+def _ocr_pdf(file_path: Path) -> str:
+    """
+    OCR-fallback для сканированных PDF.
+    Конвертирует каждую страницу PDF в изображение и распознаёт текст через Tesseract.
+    """
+    try:
+        import pytesseract
+        from pdf2image import convert_from_path
+    except ImportError:
+        logger.error("pytesseract или pdf2image не установлены. Запустите: pip install pytesseract pdf2image")
+        return ""
+
+    try:
+        logger.info(f"OCR: обрабатываю файл {file_path.name}")
+        # DPI=200 — баланс скорости и качества для нормативных документов
+        images = convert_from_path(str(file_path), dpi=200)
+        pages_text = []
+        for i, img in enumerate(images):
+            # rus+eng — распознаём русский и английский
+            text = pytesseract.image_to_string(img, lang="rus+eng")
+            pages_text.append(text)
+            logger.debug(f"OCR: страница {i+1}/{len(images)} распознана ({len(text)} символов)")
+        result = "\n".join(pages_text)
+        logger.info(f"OCR: завершено, всего {len(result)} символов")
+        return result
+    except Exception as e:
+        logger.error(f"OCR ошибка: {e}")
+        return ""
+
+
 def extract_text(file_path: Path, suffix: str) -> str:
+    """
+    Извлекает текст из файла.
+    Для PDF: сначала pdfplumber, если текст пустой — OCR через Tesseract.
+    """
     if suffix in (".txt", ".md"):
         return file_path.read_text(encoding="utf-8", errors="ignore")
+
     elif suffix == ".pdf":
+        # Шаг 1: пробуем pdfplumber (быстро, для PDF с выбираемым текстом)
         try:
             import pdfplumber
             with pdfplumber.open(str(file_path)) as pdf:
-                return "\n".join(page.extract_text() or "" for page in pdf.pages)
+                pages = [page.extract_text() or "" for page in pdf.pages]
+                text = "\n".join(pages).strip()
+            if text:
+                logger.info(f"pdfplumber: извлечено {len(text)} символов из {file_path.name}")
+                return text
         except Exception as e:
-            logger.error(f"pdfplumber error: {e}")
-            return ""
+            logger.warning(f"pdfplumber не справился: {e}")
+
+        # Шаг 2: если pdfplumber вернул пустоту — запускаем OCR
+        logger.info(f"pdfplumber: текст пустой, запускаем OCR для {file_path.name}")
+        return _ocr_pdf(file_path)
+
     elif suffix == ".docx":
         try:
             from docx import Document
             doc = Document(str(file_path))
             return "\n".join(p.text for p in doc.paragraphs)
         except Exception as e:
-            logger.error(f"docx error: {e}")
+            logger.error(f"docx ошибка: {e}")
             return ""
+
     return ""
 
 
@@ -121,7 +166,7 @@ class ApproveRequest(BaseModel):
     filename: str
 
 
-# ── Existing endpoints ────────────────────────────────────────────────────────
+# ── Upload ──────────────────────────────────────────────────────────────────
 
 @router.post("/upload", summary="Загрузить документ в библиотеку")
 async def upload_document(file: UploadFile = File(...)):
@@ -144,7 +189,7 @@ async def upload_document(file: UploadFile = File(...)):
     text = extract_text(save_path, suffix)
     if not text.strip():
         save_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=422, detail="Не удалось извлечь текст из файла")
+        raise HTTPException(status_code=422, detail="Не удалось извлечь текст из файла (даже OCR не помог)")
 
     chunks = chunk_text(text)
     if not chunks:
@@ -183,8 +228,11 @@ async def upload_document(file: UploadFile = File(...)):
         "chunks_added": len(ids),
         "chunks_total": len(chunks),
         "size_kb": round(len(content) / 1024, 1),
+        "ocr_used": False,  # в upload обычно pdfplumber справляется
     }
 
+
+# ── Documents ──────────────────────────────────────────────────────────────
 
 @router.get("/documents", response_model=List[DocumentInfo], summary="Список документов в библиотеке")
 def list_documents():
@@ -258,11 +306,10 @@ def delete_document(filename: str):
     return {"status": "deleted", "filename": filename, "chunks_removed": len(ids)}
 
 
-# ── NEW: Search & Approve endpoints ──────────────────────────────────────────
+# ── Search & Approve ────────────────────────────────────────────────────
 
 @router.post("/search", response_model=List[SearchCandidate], summary="Поиск документов через Tavily")
 async def search_documents(req: SearchRequest):
-    """Ищет документы по теме через Tavily API и возвращает кандидатов для подтверждения."""
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="Запрос не может быть пустым")
 
@@ -293,7 +340,6 @@ async def search_documents(req: SearchRequest):
 
 @router.post("/approve", summary="Скачать и проиндексировать одобренный документ")
 async def approve_document(req: ApproveRequest):
-    """Скачивает документ по URL и добавляет в библиотеку."""
     if not req.url.startswith("http"):
         raise HTTPException(status_code=400, detail="Некорректный URL")
 
