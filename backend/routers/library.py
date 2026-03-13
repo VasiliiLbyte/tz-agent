@@ -1,5 +1,6 @@
 # backend/routers/library.py
 import sys
+import time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -13,7 +14,7 @@ from pydantic import BaseModel
 
 import chromadb
 from chromadb.config import Settings
-from openai import OpenAI
+from openai import OpenAI, APITimeoutError, APIConnectionError, RateLimitError
 
 from backend.agents.library_search_agent import (
     search_documents_for_library,
@@ -49,13 +50,38 @@ def get_chroma_collection():
         )
 
 
-def embed_text(text: str) -> List[float]:
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    response = client.embeddings.create(
-        model="text-embedding-3-small",
-        input=text[:8000],
+def embed_text(text: str, max_retries: int = 5) -> List[float]:
+    """
+    Создаёт эмбеддинг через OpenAI.
+    При таймауте/ошибке сети — повторяет с exponential backoff: 5→ 10 → 20 → 40 → 60 сек.
+    """
+    client = OpenAI(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        timeout=60.0,  # увеличенный таймаут
     )
-    return response.data[0].embedding
+    delays = [5, 10, 20, 40, 60]
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            response = client.embeddings.create(
+                model="text-embedding-3-small",
+                input=text[:8000],
+            )
+            return response.data[0].embedding
+        except (APITimeoutError, APIConnectionError) as e:
+            wait = delays[min(attempt, len(delays) - 1)]
+            logger.warning(f"embed_text: попытка {attempt+1}/{max_retries} не удалась ({type(e).__name__}), жду {wait}с...")
+            last_exc = e
+            time.sleep(wait)
+        except RateLimitError as e:
+            wait = delays[min(attempt, len(delays) - 1)]
+            logger.warning(f"embed_text: rate limit, жду {wait}с...")
+            last_exc = e
+            time.sleep(wait)
+        except Exception as e:
+            # Неизвестная ошибка — не ретраим
+            raise
+    raise RuntimeError(f"Не удалось получить эмбеддинг после {max_retries} попыток: {last_exc}")
 
 
 def chunk_text(text: str, chunk_size: int = 800, overlap: int = 150) -> List[str]:
@@ -73,7 +99,7 @@ def _correct_ocr_text(raw_text: str) -> str:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return raw_text
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(api_key=api_key, timeout=60.0)
     CHUNK_SIZE = 3000
     parts = [raw_text[i:i + CHUNK_SIZE] for i in range(0, len(raw_text), CHUNK_SIZE)]
     corrected_parts = []
@@ -153,7 +179,7 @@ def extract_and_cache(file_path: Path, suffix: str, filename: str) -> str:
     return text
 
 
-# ── Schemas ───────────────────────────────────────────────────
+# ── Schemas ─────────────────────────────────────────────────
 
 class DocumentInfo(BaseModel):
     filename: str
@@ -179,14 +205,14 @@ class SearchCandidate(BaseModel):
     already_indexed: bool
     filename: str
     score: int
-    relevance_pct: int  # 0-100
+    relevance_pct: int
 
 class ApproveRequest(BaseModel):
     url: str
     filename: str
 
 
-# ── Upload ─────────────────────────────────────────────────
+# ── Upload ───────────────────────────────────────────────
 
 @router.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
@@ -215,7 +241,8 @@ async def upload_document(file: UploadFile = File(...)):
                 continue
         except Exception:
             pass
-        ids.append(chunk_id); embeddings.append(embed_text(chunk))
+        ids.append(chunk_id)
+        embeddings.append(embed_text(chunk))
         documents.append(chunk)
         metadatas.append({"source": source_path, "file_name": file.filename, "chunk_index": i, "total_chunks": len(chunks)})
     if ids:
@@ -241,7 +268,7 @@ def list_documents():
     result = []
     for fn, info in files.items():
         fp = LIBRARY_ROOT / fn
-        result.append(DocumentInfo(filename=fn, size_kb=round(fp.stat().st_size/1024,1) if fp.exists() else 0, chunks=info["chunks"], source=info["source"]))
+        result.append(DocumentInfo(filename=fn, size_kb=round(fp.stat().st_size/1024, 1) if fp.exists() else 0, chunks=info["chunks"], source=info["source"]))
     return result
 
 
