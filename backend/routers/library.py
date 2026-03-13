@@ -4,7 +4,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import os
-import shutil
 import hashlib
 import logging
 from typing import List
@@ -15,6 +14,11 @@ from pydantic import BaseModel
 import chromadb
 from chromadb.config import Settings
 from openai import OpenAI
+
+from backend.agents.library_search_agent import (
+    search_documents_for_library,
+    download_and_index,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -64,15 +68,13 @@ def chunk_text(text: str, chunk_size: int = 800, overlap: int = 150) -> List[str
 
 
 def extract_text(file_path: Path, suffix: str) -> str:
-    if suffix == ".txt" or suffix == ".md":
+    if suffix in (".txt", ".md"):
         return file_path.read_text(encoding="utf-8", errors="ignore")
     elif suffix == ".pdf":
         try:
             import pdfplumber
             with pdfplumber.open(str(file_path)) as pdf:
-                return "\n".join(
-                    page.extract_text() or "" for page in pdf.pages
-                )
+                return "\n".join(page.extract_text() or "" for page in pdf.pages)
         except Exception as e:
             logger.error(f"pdfplumber error: {e}")
             return ""
@@ -87,18 +89,39 @@ def extract_text(file_path: Path, suffix: str) -> str:
     return ""
 
 
+# ── Schemas ──────────────────────────────────────────────────────────────────
+
 class DocumentInfo(BaseModel):
     filename: str
     size_kb: float
     chunks: int
     source: str
 
-
 class ChunkPreview(BaseModel):
     chunk_index: int
     text: str
     source: str
 
+class SearchRequest(BaseModel):
+    query: str
+
+class SearchCandidate(BaseModel):
+    title: str
+    url: str
+    snippet: str
+    source_domain: str
+    is_direct_pdf: bool
+    is_priority_source: bool
+    already_indexed: bool
+    filename: str
+    score: int
+
+class ApproveRequest(BaseModel):
+    url: str
+    filename: str
+
+
+# ── Existing endpoints ────────────────────────────────────────────────────────
 
 @router.post("/upload", summary="Загрузить документ в библиотеку")
 async def upload_document(file: UploadFile = File(...)):
@@ -109,7 +132,6 @@ async def upload_document(file: UploadFile = File(...)):
             detail=f"Неподдерживаемый формат. Допустимые: {', '.join(SUPPORTED_EXTENSIONS)}"
         )
 
-    # Сохраняем файл
     save_path = LIBRARY_ROOT / file.filename
     content = await file.read()
 
@@ -119,18 +141,15 @@ async def upload_document(file: UploadFile = File(...)):
     with open(save_path, "wb") as f:
         f.write(content)
 
-    # Извлекаем текст
     text = extract_text(save_path, suffix)
     if not text.strip():
         save_path.unlink(missing_ok=True)
         raise HTTPException(status_code=422, detail="Не удалось извлечь текст из файла")
 
-    # Разбиваем на чанки
     chunks = chunk_text(text)
     if not chunks:
         raise HTTPException(status_code=422, detail="Файл не содержит текста")
 
-    # Индексируем в ChromaDB
     collection = get_chroma_collection()
     file_hash = hashlib.md5(content).hexdigest()
     source_path = f"library/uploads/{file.filename}"
@@ -138,14 +157,12 @@ async def upload_document(file: UploadFile = File(...)):
     ids, embeddings, documents, metadatas = [], [], [], []
     for i, chunk in enumerate(chunks):
         chunk_id = f"{file_hash}_{i}"
-        # Пропускаем если уже есть
         try:
             existing = collection.get(ids=[chunk_id])
             if existing["ids"]:
                 continue
         except Exception:
             pass
-
         emb = embed_text(chunk)
         ids.append(chunk_id)
         embeddings.append(emb)
@@ -158,12 +175,7 @@ async def upload_document(file: UploadFile = File(...)):
         })
 
     if ids:
-        collection.add(
-            ids=ids,
-            embeddings=embeddings,
-            documents=documents,
-            metadatas=metadatas,
-        )
+        collection.add(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
 
     return {
         "status": "indexed",
@@ -182,7 +194,6 @@ def list_documents():
     except Exception:
         return []
 
-    # Группируем чанки по файлам
     files: dict = {}
     for meta in (all_items.get("metadatas") or []):
         fn = meta.get("file_name", "неизвестно")
@@ -232,8 +243,6 @@ def preview_chunks(filename: str, limit: int = 5):
 @router.delete("/documents/{filename}", summary="Удалить документ из библиотеки")
 def delete_document(filename: str):
     collection = get_chroma_collection()
-
-    # Находим все id чанков этого файла
     try:
         results = collection.get(where={"file_name": filename}, include=[])
         ids = results.get("ids") or []
@@ -242,9 +251,67 @@ def delete_document(filename: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # Удаляем физический файл
     file_path = LIBRARY_ROOT / filename
     if file_path.exists():
         file_path.unlink()
 
     return {"status": "deleted", "filename": filename, "chunks_removed": len(ids)}
+
+
+# ── NEW: Search & Approve endpoints ──────────────────────────────────────────
+
+@router.post("/search", response_model=List[SearchCandidate], summary="Поиск документов через Tavily")
+async def search_documents(req: SearchRequest):
+    """Ищет документы по теме через Tavily API и возвращает кандидатов для подтверждения."""
+    if not req.query.strip():
+        raise HTTPException(status_code=400, detail="Запрос не может быть пустым")
+
+    collection = get_chroma_collection()
+    candidates = await search_documents_for_library(
+        query=req.query,
+        chroma_collection=collection,
+    )
+
+    if not candidates:
+        raise HTTPException(status_code=404, detail="Ничего не найдено. Попробуйте другой запрос.")
+
+    return [
+        SearchCandidate(
+            title=c["title"],
+            url=c["url"],
+            snippet=c["snippet"],
+            source_domain=c["source_domain"],
+            is_direct_pdf=c["is_direct_pdf"],
+            is_priority_source=c["is_priority_source"],
+            already_indexed=c["already_indexed"],
+            filename=c["filename"],
+            score=c["score"],
+        )
+        for c in candidates
+    ]
+
+
+@router.post("/approve", summary="Скачать и проиндексировать одобренный документ")
+async def approve_document(req: ApproveRequest):
+    """Скачивает документ по URL и добавляет в библиотеку."""
+    if not req.url.startswith("http"):
+        raise HTTPException(status_code=400, detail="Некорректный URL")
+
+    filename = req.filename or req.url.split("/")[-1].split("?")[0]
+    if not filename or "." not in filename:
+        filename = "document.pdf"
+
+    result = await download_and_index(
+        url=req.url,
+        filename=filename,
+        library_root=LIBRARY_ROOT,
+        collection=get_chroma_collection(),
+        embed_fn=embed_text,
+        chunk_fn=chunk_text,
+        extract_fn=extract_text,
+    )
+
+    if result.get("status") == "error":
+        raise HTTPException(status_code=422, detail=result["detail"])
+
+    return result
