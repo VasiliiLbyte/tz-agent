@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
+import { Toast, useToast } from '../components/Toast';
 
 interface DocumentInfo {
   filename: string;
@@ -42,12 +43,33 @@ function RelevanceBadge({ pct }: { pct: number }) {
   );
 }
 
+// Прогресс-бар для длинных операций
+function ProgressBar({ label, step, total }: { label: string; step: number; total: number }) {
+  const pct = total > 0 ? Math.round((step / total) * 100) : 0;
+  return (
+    <div className="bg-gray-800 rounded-xl p-4 border border-gray-700">
+      <div className="flex justify-between text-sm mb-2">
+        <span className="text-gray-300">{label}</span>
+        <span className="text-blue-400 font-medium">{pct}%</span>
+      </div>
+      <div className="w-full bg-gray-700 rounded-full h-2">
+        <div
+          className="bg-blue-500 h-2 rounded-full transition-all duration-500"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <p className="text-xs text-gray-500 mt-1">{step} / {total}</p>
+    </div>
+  );
+}
+
 export default function LibraryPage() {
   const [tab, setTab] = useState<'library' | 'search'>('library');
+  const { toasts, add: addToast, remove: removeToast, update: updateToast } = useToast();
 
   const [documents, setDocuments] = useState<DocumentInfo[]>([]);
   const [uploading, setUploading] = useState(false);
-  const [uploadResult, setUploadResult] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<{ step: number; total: number; label: string } | null>(null);
   const [previewFile, setPreviewFile] = useState<string | null>(null);
   const [chunks, setChunks] = useState<ChunkPreview[]>([]);
   const [loadingPreview, setLoadingPreview] = useState(false);
@@ -62,7 +84,7 @@ export default function LibraryPage() {
   const [candidates, setCandidates] = useState<SearchCandidate[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [approving, setApproving] = useState(false);
-  const [approveResults, setApproveResults] = useState<string[]>([]);
+  const [approveProgress, setApproveProgress] = useState<{ step: number; total: number } | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
 
   useEffect(() => { loadDocuments(); }, []);
@@ -75,16 +97,46 @@ export default function LibraryPage() {
   };
 
   const handleUpload = async (file: File) => {
-    setUploading(true); setUploadResult(null);
+    setUploading(true);
+    setUploadProgress(null);
+    const tid = addToast('loading', `📄 Загружаю ${file.name}...`, true);
+
+    // Показываем этапы
+    const steps = [
+      'Читаю файл...',
+      'Извлекаю текст...',
+      'Создаю эмбеддинги...',
+      'Сохраняю в базу...',
+    ];
+    let stepIdx = 0;
+    setUploadProgress({ step: 0, total: steps.length, label: steps[0] });
+
+    const stepTimer = setInterval(() => {
+      stepIdx = Math.min(stepIdx + 1, steps.length - 1);
+      setUploadProgress({ step: stepIdx, total: steps.length, label: steps[stepIdx] });
+      updateToast(tid, 'loading', `⏳ ${steps[stepIdx]}`);
+    }, 3000);
+
     const formData = new FormData();
     formData.append('file', file);
     try {
       const res = await fetch(`${API}/upload`, { method: 'POST', body: formData });
       const data = await res.json();
-      setUploadResult(res.ok ? `✅ ${data.filename} — ${data.chunks_added} чанков` : `❌ ${data.detail}`);
-      if (res.ok) loadDocuments();
-    } catch (e: any) { setUploadResult(`❌ ${e.message}`); }
-    finally { setUploading(false); }
+      clearInterval(stepTimer);
+      setUploadProgress(null);
+      if (res.ok) {
+        updateToast(tid, 'success', `✅ ${data.filename} — ${data.chunks_added} чанков добавлено`);
+        loadDocuments();
+      } else {
+        updateToast(tid, 'error', `❌ ${data.detail}`);
+      }
+    } catch (e: any) {
+      clearInterval(stepTimer);
+      setUploadProgress(null);
+      updateToast(tid, 'error', `❌ ${e.message}`);
+    } finally {
+      setUploading(false);
+    }
   };
 
   const handleDrop = (e: React.DragEvent) => {
@@ -105,32 +157,55 @@ export default function LibraryPage() {
 
   const openFullText = async (filename: string) => {
     setLoadingText(filename);
+    const tid = addToast('loading', `📖 Загружаю текст ${filename}...`, true);
     try {
       const res = await fetch(`${API}/text?filename=${encodeURIComponent(filename)}`);
       const data = await res.json();
-      if (res.ok) setTextModal({ filename, text: data.text });
-      else alert(`Ошибка: ${data.detail}`);
-    } catch (e: any) { alert(e.message); }
-    finally { setLoadingText(null); }
+      if (res.ok) {
+        updateToast(tid, 'success', `✅ Текст загружен (${data.text.length.toLocaleString()} символов)`);
+        setTextModal({ filename, text: data.text });
+      } else {
+        updateToast(tid, 'error', `❌ ${data.detail}`);
+      }
+    } catch (e: any) {
+      updateToast(tid, 'error', `❌ ${e.message}`);
+    } finally {
+      setLoadingText(null);
+    }
   };
 
   const handleDelete = async (filename: string) => {
     if (!confirm(`Удалить «${filename}»?`)) return;
+    const tid = addToast('loading', `🗑 Удаляю ${filename}...`, true);
     await fetch(`${API}/documents/${encodeURIComponent(filename)}`, { method: 'DELETE' });
-    setPreviewFile(null); loadDocuments();
+    updateToast(tid, 'success', `✅ ${filename} удалён`);
+    setPreviewFile(null);
+    loadDocuments();
   };
 
   const handleSearch = async () => {
     if (!searchQuery.trim()) return;
-    setSearching(true); setCandidates([]); setSelected(new Set()); setApproveResults([]); setSearchError(null);
+    setSearching(true);
+    setCandidates([]); setSelected(new Set()); setSearchError(null);
+    const tid = addToast('loading', `🔍 Ищу документы по запросу...`, true);
     try {
       const res = await fetch(`${API}/search`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: searchQuery }),
       });
       const data = await res.json();
-      res.ok ? setCandidates(data) : setSearchError(data.detail);
-    } catch (e: any) { setSearchError(e.message); }
+      if (res.ok) {
+        updateToast(tid, 'success', `✅ Найдено ${data.length} уникальных документов`);
+        setCandidates(data);
+      } else {
+        updateToast(tid, 'error', `❌ ${data.detail}`);
+        setSearchError(data.detail);
+      }
+    } catch (e: any) {
+      updateToast(tid, 'error', `❌ ${e.message}`);
+      setSearchError(e.message);
+    }
     setSearching(false);
   };
 
@@ -141,23 +216,45 @@ export default function LibraryPage() {
   const handleApprove = async () => {
     const toApprove = candidates.filter(c => selected.has(c.url) && !c.already_indexed);
     if (!toApprove.length) return;
-    setApproving(true); setApproveResults([]);
-    const results: string[] = [];
-    for (const c of toApprove) {
+    setApproving(true);
+    setApproveProgress({ step: 0, total: toApprove.length });
+    const globalTid = addToast('loading', `⬇️ Скачиваю ${toApprove.length} документов...`, true);
+
+    let ok = 0; let fail = 0;
+    for (let i = 0; i < toApprove.length; i++) {
+      const c = toApprove[i];
+      const tid = addToast('loading', `⬇️ [${i+1}/${toApprove.length}] ${c.title.slice(0, 50)}...`, true);
       try {
         const res = await fetch(`${API}/approve`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ url: c.url, filename: c.filename }),
         });
         const data = await res.json();
-        results.push(res.ok ? `✅ ${data.filename} — ${data.chunks_added} чанков` : `❌ ${c.title}: ${data.detail}`);
-      } catch (e: any) { results.push(`❌ ${c.title}: ${e.message}`); }
+        if (res.ok) {
+          updateToast(tid, 'success', `✅ ${data.filename} — ${data.chunks_added} чанков`);
+          ok++;
+        } else {
+          updateToast(tid, 'error', `❌ ${c.filename}: ${data.detail}`);
+          fail++;
+        }
+      } catch (e: any) {
+        updateToast(tid, 'error', `❌ ${c.filename}: ${e.message}`);
+        fail++;
+      }
+      setApproveProgress({ step: i + 1, total: toApprove.length });
     }
-    setApproveResults(results); setApproving(false); loadDocuments();
+
+    updateToast(globalTid, fail === 0 ? 'success' : 'info',
+      `Готово: ${ok} добавлено${fail > 0 ? `, ${fail} ошибок` : ''}`);
+    setApproving(false);
+    setApproveProgress(null);
+    loadDocuments();
   };
 
   return (
     <div className="min-h-screen bg-gray-900 text-white p-8">
+      <Toast toasts={toasts} onRemove={removeToast} />
       <div className="max-w-4xl mx-auto space-y-6">
 
         <div>
@@ -171,7 +268,7 @@ export default function LibraryPage() {
               className={`px-5 py-2 text-sm font-medium border-b-2 -mb-px transition ${
                 tab === t ? 'border-blue-500 text-blue-400' : 'border-transparent text-gray-400 hover:text-gray-200'
               }`}>
-              {t === 'library' ? '📂 Моя библиотека' : '🔍 Найти документы'}
+              {t === 'library' ? '📂 Мои документы' : '🔍 Найти документы'}
             </button>
           ))}
         </div>
@@ -182,25 +279,33 @@ export default function LibraryPage() {
               onDragOver={e => { e.preventDefault(); setDragOver(true); }}
               onDragLeave={() => setDragOver(false)}
               onDrop={handleDrop}
-              onClick={() => fileInputRef.current?.click()}
-              className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition ${
-                dragOver ? 'border-blue-400 bg-blue-900/20' : 'border-gray-600 hover:border-gray-400'
+              onClick={() => !uploading && fileInputRef.current?.click()}
+              className={`border-2 border-dashed rounded-xl p-10 text-center transition ${
+                uploading ? 'border-blue-500 bg-blue-900/10 cursor-wait'
+                  : dragOver ? 'border-blue-400 bg-blue-900/20 cursor-copy'
+                  : 'border-gray-600 hover:border-gray-400 cursor-pointer'
               }`}>
               <input ref={fileInputRef} type="file" accept=".pdf,.docx,.txt,.md"
                 className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleUpload(f); }} />
-              {uploading
-                ? <p className="text-blue-400">⏳ Индексация... (скан PDF может занять 1–2 минуты)</p>
-                : (<><p className="text-4xl mb-2">📄</p>
+              {uploading ? (
+                <div className="space-y-3">
+                  <p className="text-blue-400 text-lg">⏳ Обрабатываю файл...</p>
+                  {uploadProgress && (
+                    <ProgressBar
+                      label={uploadProgress.label}
+                      step={uploadProgress.step}
+                      total={uploadProgress.total}
+                    />
+                  )}
+                </div>
+              ) : (
+                <>
+                  <p className="text-4xl mb-2">📄</p>
                   <p className="text-gray-300">Перетащите файл или нажмите для выбора</p>
-                  <p className="text-gray-500 text-sm mt-1">PDF, DOCX, TXT, MD — до 20 МБ</p></>)
-              }
+                  <p className="text-gray-500 text-sm mt-1">PDF, DOCX, TXT, MD — до 20 МБ</p>
+                </>
+              )}
             </div>
-
-            {uploadResult && (
-              <div className={`p-3 rounded-lg text-sm ${
-                uploadResult.startsWith('✅') ? 'bg-green-900/40 text-green-300' : 'bg-red-900/40 text-red-300'
-              }`}>{uploadResult}</div>
-            )}
 
             {documents.length > 0 ? (
               <div className="space-y-3">
@@ -222,7 +327,7 @@ export default function LibraryPage() {
                         </button>
                         <button onClick={() => loadPreview(doc.filename)}
                           className="text-xs px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition">
-                          {previewFile === doc.filename ? '▲ Скрыть' : '▼ Чанки'}
+                          {previewFile === doc.filename ? '▲ Скрыть' : '▾ Чанки'}
                         </button>
                         <button onClick={() => handleDelete(doc.filename)}
                           className="text-xs px-3 py-1.5 bg-red-900/50 hover:bg-red-800 text-red-300 rounded-lg transition">
@@ -232,7 +337,8 @@ export default function LibraryPage() {
                     </div>
                     {previewFile === doc.filename && (
                       <div className="border-t border-gray-700 p-4 space-y-2">
-                        {loadingPreview ? <p className="text-sm text-gray-400">Загрузка...</p>
+                        {loadingPreview
+                          ? <p className="text-sm text-gray-400">Загрузка...</p>
                           : chunks.map(chunk => (
                             <div key={chunk.chunk_index} className="bg-gray-700/50 rounded-lg p-3">
                               <p className="text-xs text-gray-500 mb-1">Чанк #{chunk.chunk_index}</p>
@@ -246,7 +352,7 @@ export default function LibraryPage() {
               </div>
             ) : (
               <div className="text-center py-12 text-gray-600">
-                <p className="text-4xl mb-2">📭</p>
+                <p className="text-4xl mb-2">🗄️</p>
                 <p>База пустая — загрузите первый документ</p>
               </div>
             )}
@@ -267,13 +373,20 @@ export default function LibraryPage() {
               </button>
             </div>
 
+            {searching && (
+              <div className="flex items-center gap-3 text-blue-400 text-sm bg-blue-900/20 border border-blue-800 rounded-xl p-4">
+                <span className="animate-spin text-lg">⏳</span>
+                <span>Отправляю запрос в Tavily, ищу по ГОСТ-базам...</span>
+              </div>
+            )}
+
             {searchError && <div className="p-4 rounded-lg bg-red-900/40 text-red-300 text-sm">{searchError}</div>}
 
             {candidates.length > 0 && (
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <p className="text-sm text-gray-400">
-                    Найдено: {candidates.length} уникальных документов
+                    Найдено: <span className="text-white font-medium">{candidates.length}</span> уникальных документов
                   </p>
                   <button onClick={handleApprove} disabled={approving || selected.size === 0}
                     className="px-5 py-2 bg-green-700 hover:bg-green-600 disabled:opacity-40 rounded-xl text-sm font-medium transition">
@@ -281,14 +394,12 @@ export default function LibraryPage() {
                   </button>
                 </div>
 
-                {approveResults.length > 0 && (
-                  <div className="space-y-1">
-                    {approveResults.map((r, i) => (
-                      <div key={i} className={`text-xs p-2 rounded ${
-                        r.startsWith('✅') ? 'bg-green-900/30 text-green-300' : 'bg-red-900/30 text-red-300'
-                      }`}>{r}</div>
-                    ))}
-                  </div>
+                {approveProgress && (
+                  <ProgressBar
+                    label="Скачивание и индексация..."
+                    step={approveProgress.step}
+                    total={approveProgress.total}
+                  />
                 )}
 
                 {candidates.map(c => (
@@ -297,7 +408,7 @@ export default function LibraryPage() {
                     className={`rounded-xl p-4 border transition cursor-pointer ${
                       c.already_indexed ? 'border-gray-700 bg-gray-800/40 opacity-60 cursor-default'
                         : selected.has(c.url) ? 'border-blue-500 bg-blue-900/20'
-                          : 'border-gray-700 bg-gray-800 hover:border-gray-500'
+                        : 'border-gray-700 bg-gray-800 hover:border-gray-500'
                     }`}>
                     <div className="flex items-start gap-3">
                       {!c.already_indexed && (
