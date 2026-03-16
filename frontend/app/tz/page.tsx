@@ -1,25 +1,27 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { Toast, useToast } from '../components/Toast';
 
 const API_TZ = 'http://localhost:8000/api/tz';
 const API_LIB = 'http://localhost:8000/api/library';
+const API_WORKSHOP = 'http://localhost:8000/api/workshop';
 
 interface DocumentInfo { filename: string; size_kb: number; chunks: number; }
 interface SourceLink { title: string; url: string; standard_id: string; }
 interface StandardItem { standard_id: string; score: number; reason: string; }
 
-const STAGE_META: Record<string, { label: string; icon: string; color: string }> = {
-  draft:  { label: 'Черновик',        icon: '📝', color: 'text-gray-400' },
-  refine: { label: 'Доработка',       icon: '🔧', color: 'text-blue-400' },
-  verify: { label: 'Верификация',     icon: '🔬', color: 'text-yellow-400' },
-  final:  { label: 'Финальная версия', icon: '✅', color: 'text-green-400' },
+const STAGE_META: Record<string, { label: string; icon: string }> = {
+  draft:  { label: 'Черновик',        icon: '📝' },
+  refine: { label: 'Доработка',       icon: '🔧' },
+  verify: { label: 'Верификация',     icon: '🔬' },
+  final:  { label: 'Финальная версия', icon: '✅' },
 };
-
 const ALL_STAGES = ['draft', 'refine', 'verify', 'final'];
 
 export default function TZPage() {
+  const router = useRouter();
   const { toasts, add: addToast, remove: removeToast, update: updateToast } = useToast();
 
   const [formData, setFormData] = useState({
@@ -34,18 +36,16 @@ export default function TZPage() {
   const [completedStages, setCompletedStages] = useState<Set<string>>(new Set());
   const [statusMessage, setStatusMessage] = useState('');
 
-  // Данные по нормативам
   const [localStandards, setLocalStandards] = useState<string[]>([]);
   const [resolvedStandards, setResolvedStandards] = useState<string[]>([]);
-  const [standardItems, setStandardItems] = useState<StandardItem[]>([]);
   const [sourceLinks, setSourceLinks] = useState<SourceLink[]>([]);
   const [showSources, setShowSources] = useState(false);
 
-  // Текст по этапам
   const [stageDrafts, setStageDrafts] = useState<Record<string, string>>({});
   const [stageIssues, setStageIssues] = useState<Record<string, string[]>>({});
   const [activeTab, setActiveTab] = useState<string>('draft');
   const [done, setDone] = useState(false);
+  const [saving, setSaving] = useState(false);
   const outputRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -58,6 +58,35 @@ export default function TZPage() {
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
     setFormData({ ...formData, [e.target.name]: e.target.value });
 
+  const saveToWorkshop = async () => {
+    const finalText = stageDrafts['final'] || stageDrafts['verify'] || stageDrafts['refine'] || stageDrafts['draft'] || '';
+    if (!finalText) return;
+    setSaving(true);
+    try {
+      const title = formData.object_type
+        ? `ТЗ: ${formData.object_type}`
+        : `ТЗ от ${new Date().toLocaleDateString('ru-RU')}`;
+      const res = await fetch(`${API_WORKSHOP}/save`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title,
+          object_type: formData.object_type,
+          industry: formData.industry,
+          content: finalText,
+          form: formData,
+        }),
+      });
+      const data = await res.json();
+      addToast('success', '✅ ТЗ сохранено в Мастерскую');
+      setTimeout(() => router.push(`/workshop/${data.id}`), 1200);
+    } catch {
+      addToast('error', '❌ Ошибка сохранения');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -66,7 +95,7 @@ export default function TZPage() {
     setStageIssues({});
     setCompletedStages(new Set());
     setCurrentStage(null);
-    setLocalStandards([]); setResolvedStandards([]); setStandardItems([]); setSourceLinks([]);
+    setLocalStandards([]); setResolvedStandards([]); setSourceLinks([]);
     setStatusMessage('');
     setActiveTab('draft');
 
@@ -84,7 +113,6 @@ export default function TZPage() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
-      let activeStage = 'draft';
 
       while (true) {
         const { done: sd, value } = await reader.read();
@@ -97,40 +125,21 @@ export default function TZPage() {
           if (!line.startsWith('data: ')) continue;
           try {
             const msg = JSON.parse(line.slice(6));
-
-            if (msg.type === 'status') {
-              setStatusMessage(msg.message);
-              updateToast(tid, 'loading', msg.message, true);
-
-            } else if (msg.type === 'standards_found') {
-              setLocalStandards(msg.local_standards ?? []);
-              setResolvedStandards(msg.resolved_standards ?? []);
-              setStandardItems(msg.items ?? []);
-
-            } else if (msg.type === 'reference_sources') {
-              setSourceLinks(msg.sources ?? []);
-
-            } else if (msg.type === 'issues') {
-              setStageIssues(prev => ({ ...prev, [msg.stage]: msg.issues }));
-
-            } else if (msg.type === 'stage_start') {
-              activeStage = msg.stage;
-              setCurrentStage(msg.stage);
-              setActiveTab(msg.stage);
-              const meta = STAGE_META[msg.stage];
-              updateToast(tid, 'loading', `${meta.icon} ${meta.label}...`, true);
-
-            } else if (msg.type === 'token') {
+            if (msg.type === 'status') { setStatusMessage(msg.message); updateToast(tid, 'loading', msg.message, true); }
+            else if (msg.type === 'standards_found') { setLocalStandards(msg.local_standards ?? []); setResolvedStandards(msg.resolved_standards ?? []); }
+            else if (msg.type === 'reference_sources') { setSourceLinks(msg.sources ?? []); }
+            else if (msg.type === 'issues') { setStageIssues(prev => ({ ...prev, [msg.stage]: msg.issues })); }
+            else if (msg.type === 'stage_start') {
+              setCurrentStage(msg.stage); setActiveTab(msg.stage);
+              updateToast(tid, 'loading', `${STAGE_META[msg.stage]?.icon} ${STAGE_META[msg.stage]?.label}...`, true);
+            }
+            else if (msg.type === 'token') {
               setStageDrafts(prev => ({ ...prev, [msg.stage]: (prev[msg.stage] ?? '') + msg.text }));
               setTimeout(() => outputRef.current?.scrollTo(0, outputRef.current.scrollHeight), 0);
-
-            } else if (msg.type === 'stage_done') {
-              setCompletedStages(prev => new Set([...prev, msg.stage]));
-
-            } else if (msg.type === 'done') {
-              setDone(true);
-              setCurrentStage(null);
-              setStatusMessage('');
+            }
+            else if (msg.type === 'stage_done') { setCompletedStages(prev => new Set([...prev, msg.stage])); }
+            else if (msg.type === 'done') {
+              setDone(true); setCurrentStage(null); setStatusMessage('');
               updateToast(tid, 'success', '✅ ТЗ сформировано (4 этапа)');
             }
           } catch {}
@@ -152,14 +161,15 @@ export default function TZPage() {
       <Toast toasts={toasts} onRemove={removeToast} />
       <div className="max-w-4xl mx-auto space-y-6">
 
-        <div>
-          <h1 className="text-3xl font-bold">📝 Генератор ТЗ</h1>
-          <p className="text-gray-400 text-sm mt-1">4 этапа: черновик → доработка (DeepSeek) → верификация → финал</p>
+        <div className="flex items-center gap-4">
+          <div className="flex-1">
+            <h1 className="text-3xl font-bold">📝 Генератор ТЗ</h1>
+            <p className="text-gray-400 text-sm mt-1">4 этапа: черновик → доработка (DeepSeek) → верификация → финал</p>
+          </div>
+          <a href="/" className="text-gray-400 hover:text-white text-sm transition">← Главная</a>
         </div>
 
-        {/* Форма */}
         <form onSubmit={handleSubmit} className="space-y-5 bg-gray-800 p-6 rounded-xl">
-
           {/* Выбор документов */}
           <div>
             <div className="flex items-center justify-between mb-2">
@@ -176,8 +186,7 @@ export default function TZPage() {
               <div className="flex flex-wrap gap-2 mb-2">
                 {Array.from(selectedDocs).map(fn => (
                   <span key={fn} className="flex items-center gap-1 text-xs bg-blue-900/50 text-blue-300 border border-blue-700 px-2 py-1 rounded-lg">
-                    📄 {fn}
-                    <button type="button" onClick={() => toggleDoc(fn)} className="ml-1 hover:text-white">×</button>
+                    📄 {fn} <button type="button" onClick={() => toggleDoc(fn)} className="ml-1 hover:text-white">×</button>
                   </span>
                 ))}
               </div>
@@ -190,8 +199,7 @@ export default function TZPage() {
                     <label key={doc.filename} className={`flex items-center gap-3 p-2 rounded-lg cursor-pointer transition ${
                       selectedDocs.has(doc.filename) ? 'bg-blue-900/40' : 'hover:bg-gray-600'
                     }`}>
-                      <input type="checkbox" checked={selectedDocs.has(doc.filename)}
-                        onChange={() => toggleDoc(doc.filename)} className="w-4 h-4 accent-blue-500" />
+                      <input type="checkbox" checked={selectedDocs.has(doc.filename)} onChange={() => toggleDoc(doc.filename)} className="w-4 h-4 accent-blue-500" />
                       <span className="text-sm">📄 {doc.filename}</span>
                       <span className="text-xs text-gray-500 ml-auto">{doc.chunks} чанков</span>
                     </label>
@@ -250,15 +258,14 @@ export default function TZPage() {
           </button>
         </form>
 
-        {/* Прогресс пайплайна */}
+        {/* Прогресс */}
         {(loading || done) && (
-          <div className="bg-gray-800 rounded-xl p-5 space-y-4">
-            <div className="flex items-center gap-4">
+          <div className="bg-gray-800 rounded-xl p-5 space-y-3">
+            <div className="flex items-center gap-3 flex-wrap">
               {ALL_STAGES.map((sid, idx) => {
                 const meta = STAGE_META[sid];
-                const isActive = currentStage === sid;
                 const isDone = completedStages.has(sid);
-                const isPending = !isActive && !isDone;
+                const isActive = currentStage === sid;
                 return (
                   <div key={sid} className="flex items-center gap-2">
                     <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition ${
@@ -266,19 +273,14 @@ export default function TZPage() {
                       : isActive ? 'bg-blue-900/50 text-blue-300 border border-blue-600 animate-pulse'
                       : 'bg-gray-700 text-gray-500 border border-gray-600'
                     }`}>
-                      <span>{isDone ? '✓' : isActive ? '⏳' : meta.icon}</span>
-                      <span>{meta.label}</span>
+                      <span>{isDone ? '✓' : meta.icon}</span><span>{meta.label}</span>
                     </div>
-                    {idx < ALL_STAGES.length - 1 && (
-                      <span className="text-gray-600">→</span>
-                    )}
+                    {idx < ALL_STAGES.length - 1 && <span className="text-gray-600">→</span>}
                   </div>
                 );
               })}
             </div>
-            {statusMessage && (
-              <p className="text-sm text-blue-300 animate-pulse">{statusMessage}</p>
-            )}
+            {statusMessage && <p className="text-sm text-blue-300 animate-pulse">{statusMessage}</p>}
           </div>
         )}
 
@@ -287,7 +289,7 @@ export default function TZPage() {
           <div className="bg-gray-800 rounded-xl p-4 space-y-3">
             <div className="flex items-center justify-between">
               <p className="text-sm font-medium text-gray-300">
-                📚 Нормативных документов: <span className="text-blue-400 font-bold">{allStandards.length}</span>
+                📋 Нормативов: <span className="text-blue-400 font-bold">{allStandards.length}</span>
                 <span className="ml-2 text-xs text-gray-500">(📁 из библиотеки · 🌐 из интернета)</span>
               </p>
               {sourceLinks.length > 0 && (
@@ -310,8 +312,7 @@ export default function TZPage() {
                 {sourceLinks.map((src, i) => (
                   <div key={i} className="flex gap-2 text-xs">
                     <span className="text-gray-500 font-mono shrink-0 w-32 truncate">{src.standard_id}</span>
-                    <a href={src.url} target="_blank" rel="noopener noreferrer"
-                      className="text-blue-400 hover:underline truncate">{src.title}</a>
+                    <a href={src.url} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline truncate">{src.title}</a>
                   </div>
                 ))}
               </div>
@@ -322,40 +323,38 @@ export default function TZPage() {
         {/* Вкладки этапов */}
         {Object.keys(stageDrafts).length > 0 && (
           <div className="bg-gray-800 rounded-xl overflow-hidden">
-            {/* Табы */}
             <div className="flex border-b border-gray-700">
               {ALL_STAGES.filter(sid => stageDrafts[sid] || completedStages.has(sid) || currentStage === sid).map(sid => {
                 const meta = STAGE_META[sid];
                 const isDone = completedStages.has(sid);
-                const isActive = activeTab === sid;
                 const issues = stageIssues[sid] || [];
                 return (
                   <button key={sid} onClick={() => setActiveTab(sid)}
                     className={`flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 -mb-px transition ${
-                      isActive ? 'border-blue-500 text-white bg-gray-700/50'
-                      : 'border-transparent text-gray-400 hover:text-gray-200 hover:bg-gray-700/30'
+                      activeTab === sid ? 'border-blue-500 text-white bg-gray-700/50' : 'border-transparent text-gray-400 hover:text-gray-200'
                     }`}>
                     <span>{isDone ? '✓' : meta.icon}</span>
                     <span>{meta.label}</span>
                     {issues.length > 0 && (
-                      <span className="text-xs bg-orange-900/60 text-orange-300 border border-orange-700 px-1.5 rounded-full">
-                        {issues.length}
-                      </span>
+                      <span className="text-xs bg-orange-900/60 text-orange-300 border border-orange-700 px-1.5 rounded-full">{issues.length}</span>
                     )}
                   </button>
                 );
               })}
-              {done && (
-                <div className="ml-auto flex items-center pr-4 gap-2">
-                  <button onClick={() => navigator.clipboard.writeText(finalText)}
-                    className="text-xs px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition">
-                    📋 Копировать финал
+              <div className="ml-auto flex items-center pr-4 gap-2">
+                {done && (
+                  <button onClick={saveToWorkshop} disabled={saving}
+                    className="text-xs px-3 py-1.5 bg-orange-700 hover:bg-orange-600 disabled:bg-gray-600 rounded-lg transition font-medium">
+                    {saving ? '⏳ Сохранение...' : '🛠️ Сохранить в Мастерскую'}
                   </button>
-                </div>
-              )}
+                )}
+                <button onClick={() => navigator.clipboard.writeText(finalText)}
+                  className="text-xs px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg transition">
+                  📋 Копировать
+                </button>
+              </div>
             </div>
 
-            {/* Замечания DeepSeek */}
             {stageIssues[activeTab]?.length > 0 && (
               <div className="border-b border-gray-700 p-4 bg-orange-900/10">
                 <p className="text-xs font-semibold text-orange-300 mb-2">🤖 Замечания DeepSeek ({stageIssues[activeTab].length}):</p>
@@ -367,7 +366,6 @@ export default function TZPage() {
               </div>
             )}
 
-            {/* Текст этапа */}
             <div ref={outputRef}
               className="p-6 whitespace-pre-wrap text-sm text-gray-300 leading-relaxed max-h-[65vh] overflow-y-auto font-mono">
               {stageDrafts[activeTab] || ''}
