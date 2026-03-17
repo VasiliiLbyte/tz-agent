@@ -137,6 +137,25 @@ function QuestionCard({ q, patch, accepting, onAnswer, onAccept, onReject }: {
   );
 }
 
+// ─ ExpandedPromptBlock
+function ExpandedPromptBlock({ text }: { text: string }) {
+  const [open, setOpen] = useState(true);
+  return (
+    <div className="rounded-xl border border-amber-700 bg-amber-900/20">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between px-4 py-2.5 text-left"
+      >
+        <span className="text-sm font-semibold text-amber-300">💡 Авто-промпт для GPT-4o</span>
+        <span className="text-xs text-amber-500">{open ? '▲ Свернуть' : '▼ Развернуть'}</span>
+      </button>
+      {open && (
+        <p className="px-4 pb-4 text-xs text-amber-200/80 whitespace-pre-wrap font-mono">{text}</p>
+      )}
+    </div>
+  );
+}
+
 export default function WorkshopItemPage() {
   const { id } = useParams<{ id: string }>();
 
@@ -156,14 +175,15 @@ export default function WorkshopItemPage() {
   const [accepting, setAccepting]               = useState<string | null>(null);
 
   // prompt refine
-  const [promptText, setPromptText]             = useState('');
-  const [withReview, setWithReview]             = useState(false);   // ← чекбокс DeepSeek
-  const [promptLoading, setPromptLoading]       = useState(false);
-  const [promptStatus, setPromptStatus]         = useState('');
-  const [promptStream, setPromptStream]         = useState('');
-  const [promptReview, setPromptReview]         = useState<PromptReviewResult | null>(null);
-  const [promptPatch, setPromptPatch]           = useState<any>(null);
-  const [promptAccepting, setPromptAccepting]   = useState(false);
+  const [promptText, setPromptText]               = useState('');
+  const [withReview, setWithReview]               = useState(false);
+  const [promptLoading, setPromptLoading]         = useState(false);
+  const [promptStatus, setPromptStatus]           = useState('');
+  const [promptStream, setPromptStream]           = useState('');
+  const [expandedPrompt, setExpandedPrompt]       = useState<string | null>(null); // ← авто-промпт
+  const [promptReview, setPromptReview]           = useState<PromptReviewResult | null>(null);
+  const [promptPatch, setPromptPatch]             = useState<any>(null);
+  const [promptAccepting, setPromptAccepting]     = useState(false);
   const promptRef = useRef<HTMLDivElement>(null);
 
   // refine batch
@@ -176,10 +196,10 @@ export default function WorkshopItemPage() {
   const refineRef = useRef<HTMLDivElement>(null);
 
   // history
-  const [history, setHistory]             = useState<HistoryEntry[]>([]);
+  const [history, setHistory]               = useState<HistoryEntry[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [selectedEntry, setSelectedEntry] = useState<any>(null);
-  const [entryLoading, setEntryLoading]   = useState(false);
+  const [selectedEntry, setSelectedEntry]   = useState<any>(null);
+  const [entryLoading, setEntryLoading]     = useState(false);
 
   const [copied, setCopied] = useState(false);
 
@@ -198,14 +218,12 @@ export default function WorkshopItemPage() {
 
   useEffect(() => { loadItem(); }, [id]);
 
-  // --- Review
   const runReview = async () => {
     setReviewLoading(true); setTab('review');
     setReview(await (await fetch(`${API}/${id}/review`, { method: 'POST' })).json());
     setReviewLoading(false);
   };
 
-  // --- Questions
   const runQuestions = async () => {
     setQuestionsLoading(true); setTab('questions');
     const data = await (await fetch(`${API}/${id}/questions`, { method: 'POST' })).json();
@@ -264,13 +282,19 @@ export default function WorkshopItemPage() {
   const runPromptRefine = async () => {
     if (!promptText.trim()) return;
     setPromptLoading(true);
-    setPromptPatch(null); setPromptStream(''); setPromptStatus(''); setPromptReview(null);
+    setPromptPatch(null);
+    setPromptStream('');
+    setPromptStatus('');
+    setPromptReview(null);
+    setExpandedPrompt(null);
     setTab('prompt');
+
     const res = await fetch(`${API}/${id}/prompt-refine`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt: promptText, with_review: withReview }),
     });
     if (!res.body) { setPromptLoading(false); return; }
+
     const reader = res.body.getReader(); const decoder = new TextDecoder(); let buf = '';
     while (true) {
       const { done, value } = await reader.read(); if (done) break;
@@ -282,6 +306,9 @@ export default function WorkshopItemPage() {
           const msg = JSON.parse(line.slice(6));
           if (msg.type === 'status') {
             setPromptStatus(msg.message);
+          } else if (msg.type === 'expanded_prompt') {
+            setExpandedPrompt(msg.text);       // ← авто-промпт получен
+            setPromptStatus('');
           } else if (msg.type === 'token') {
             setPromptStream(t => t + msg.text);
             setTimeout(() => promptRef.current?.scrollTo(0, promptRef.current.scrollHeight), 0);
@@ -307,11 +334,15 @@ export default function WorkshopItemPage() {
         diff: promptPatch.diff, changed_lines: promptPatch.changedLines }),
     });
     setItem((p: any) => ({ ...p, content: promptPatch.newContent, updated_at: new Date().toISOString() }));
-    setPromptPatch(null); setPromptStream(''); setPromptText(''); setPromptReview(null);
+    setPromptPatch(null); setPromptStream(''); setPromptText('');
+    setPromptReview(null); setExpandedPrompt(null);
     setPromptAccepting(false); loadHistory();
   };
 
-  const rejectPromptPatch = () => { setPromptPatch(null); setPromptStream(''); setPromptReview(null); };
+  const rejectPromptPatch = () => {
+    setPromptPatch(null); setPromptStream('');
+    setPromptReview(null); setExpandedPrompt(null);
+  };
 
   // --- Refine batch
   const runRefine = async () => {
@@ -362,7 +393,6 @@ export default function WorkshopItemPage() {
     setRefinePatch(null); setRefineAccepting(false); loadHistory();
   };
 
-  // --- History entry
   const openHistoryEntry = async (entryId: string) => {
     setEntryLoading(true); setSelectedEntry(null);
     const data = await (await fetch(`${API}/${id}/history/${entryId}`)).json();
@@ -516,6 +546,9 @@ export default function WorkshopItemPage() {
               {/* Статус */}
               {promptStatus && <p className="text-orange-300 text-sm animate-pulse">{promptStatus}</p>}
 
+              {/* Авто-промпт (collapsed by default — в компоненте развернут сразу) */}
+              {expandedPrompt && <ExpandedPromptBlock text={expandedPrompt} />}
+
               {/* Стриминг GPT-4o */}
               {!promptPatch && (
                 <div ref={promptRef} className="whitespace-pre-wrap text-sm text-gray-300 font-mono max-h-[50vh] overflow-y-auto">
@@ -536,29 +569,21 @@ export default function WorkshopItemPage() {
                     </p>
                     {promptReview.issues.length > 0 && (
                       <div className="flex gap-3 text-xs">
-                        {promptReview.counts.technical > 0 && (
-                          <span className="text-blue-400">🔧 техн. {promptReview.counts.technical}</span>
-                        )}
-                        {promptReview.counts.normative > 0 && (
-                          <span className="text-yellow-400">📋 норм. {promptReview.counts.normative}</span>
-                        )}
-                        {promptReview.counts.completeness > 0 && (
-                          <span className="text-orange-400">📐 полн. {promptReview.counts.completeness}</span>
-                        )}
+                        {promptReview.counts.technical > 0 && <span className="text-blue-400">🔧 техн. {promptReview.counts.technical}</span>}
+                        {promptReview.counts.normative > 0 && <span className="text-yellow-400">📋 норм. {promptReview.counts.normative}</span>}
+                        {promptReview.counts.completeness > 0 && <span className="text-orange-400">📐 полн. {promptReview.counts.completeness}</span>}
                       </div>
                     )}
                   </div>
                   {promptReview.issues.length > 0 && (
                     <ul className="space-y-1 max-h-48 overflow-y-auto">
-                      {promptReview.issues.map((iss, i) => (
-                        <li key={i} className="text-xs text-indigo-200/80">• {iss}</li>
-                      ))}
+                      {promptReview.issues.map((iss, i) => <li key={i} className="text-xs text-indigo-200/80">• {iss}</li>)}
                     </ul>
                   )}
                 </div>
               )}
 
-              {/* Diff + кнопки принять/отклонить */}
+              {/* Diff */}
               {promptPatch && (
                 <PatchPanel
                   diff={promptPatch.diff}
@@ -601,7 +626,6 @@ export default function WorkshopItemPage() {
             <div className="p-6 space-y-4">
               {historyLoading && <p className="text-gray-500 animate-pulse">Загрузка...</p>}
               {!historyLoading && history.length === 0 && <p className="text-gray-500 text-center py-8">История пуста</p>}
-
               <div className="grid grid-cols-1 gap-3">
                 {history.map(entry => (
                   <div key={entry.id}
@@ -622,18 +646,15 @@ export default function WorkshopItemPage() {
                   </div>
                 ))}
               </div>
-
               {selectedEntry && (
                 <div className="mt-4 space-y-3">
                   <div className="flex items-center justify-between">
                     <p className="text-sm font-semibold">{selectedEntry.description}</p>
                     <button onClick={() => setSelectedEntry(null)} className="text-xs text-gray-500 hover:text-white">× Закрыть</button>
                   </div>
-                  {entryLoading ? (
-                    <p className="text-gray-500 animate-pulse">Загрузка diff...</p>
-                  ) : (
-                    <DiffViewer diff={selectedEntry.diff} changedLines={selectedEntry.changed_lines} />
-                  )}
+                  {entryLoading
+                    ? <p className="text-gray-500 animate-pulse">Загрузка diff...</p>
+                    : <DiffViewer diff={selectedEntry.diff} changedLines={selectedEntry.changed_lines} />}
                 </div>
               )}
             </div>
