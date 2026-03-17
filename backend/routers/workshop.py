@@ -39,15 +39,15 @@ async def get_db():
             updated_at  TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS tz_history (
-            id          TEXT PRIMARY KEY,
-            tz_id       TEXT NOT NULL,
-            action      TEXT NOT NULL,
-            description TEXT NOT NULL,
-            old_content TEXT,
-            new_content TEXT,
-            diff        TEXT,
+            id            TEXT PRIMARY KEY,
+            tz_id         TEXT NOT NULL,
+            action        TEXT NOT NULL,
+            description   TEXT NOT NULL,
+            old_content   TEXT,
+            new_content   TEXT,
+            diff          TEXT,
             changed_lines INTEGER DEFAULT 0,
-            created_at  TEXT NOT NULL
+            created_at    TEXT NOT NULL
         );
     """)
     for col_sql in [
@@ -64,7 +64,8 @@ async def get_db():
 def make_diff(old: str, new: str) -> List[dict]:
     old_lines, new_lines = old.splitlines(), new.splitlines()
     result = []
-    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False).get_opcodes():
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(
+            None, old_lines, new_lines, autojunk=False).get_opcodes():
         if op == 'equal':
             for l in old_lines[i1:i2]: result.append({"type": "equal",  "line": l})
         elif op == 'replace':
@@ -78,9 +79,11 @@ def make_diff(old: str, new: str) -> List[dict]:
 
 
 async def add_history(db, tz_id: str, action: str, description: str,
-                      old_content: str, new_content: str, diff: List[dict], changed: int):
+                      old_content: str, new_content: str,
+                      diff: List[dict], changed: int):
     await db.execute(
-        "INSERT INTO tz_history (id,tz_id,action,description,old_content,new_content,diff,changed_lines,created_at) "
+        "INSERT INTO tz_history "
+        "(id,tz_id,action,description,old_content,new_content,diff,changed_lines,created_at) "
         "VALUES (?,?,?,?,?,?,?,?,?)",
         (str(uuid.uuid4()), tz_id, action, description,
          old_content, new_content,
@@ -102,8 +105,8 @@ class SaveRequest(BaseModel):
 class AcceptRequest(BaseModel):
     content: str
     status: Optional[str] = "refined"
-    action: Optional[str] = "accept"       # для записи в историю
-    description: Optional[str] = ""        # что было сделано
+    action: Optional[str] = "accept"
+    description: Optional[str] = ""
     diff: Optional[list] = []
     changed_lines: Optional[int] = 0
 
@@ -113,7 +116,8 @@ class QuestionAnswerRequest(BaseModel):
     section: Optional[str] = ""
 
 class PromptRefineRequest(BaseModel):
-    prompt: str    # свободный промпт, например: "Улучши раздел 4"
+    prompt: str
+    with_review: bool = False   # вторичная проверка DeepSeek после GPT-4o
 
 class RefineRequest(BaseModel):
     answers: Optional[dict] = {}
@@ -128,7 +132,8 @@ async def save_tz(req: SaveRequest):
     db = await get_db()
     try:
         await db.execute(
-            "INSERT INTO tz_items (id,title,object_type,industry,content,form,questions,status,created_at,updated_at) "
+            "INSERT INTO tz_items "
+            "(id,title,object_type,industry,content,form,questions,status,created_at,updated_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?)",
             (item_id, req.title, req.object_type, req.industry,
              req.content, json.dumps(req.form or {}, ensure_ascii=False),
@@ -146,12 +151,15 @@ async def list_tz():
     db = await get_db()
     try:
         async with db.execute(
-            "SELECT id,title,object_type,industry,status,created_at,updated_at FROM tz_items ORDER BY created_at DESC"
+            "SELECT id,title,object_type,industry,status,created_at,updated_at "
+            "FROM tz_items ORDER BY created_at DESC"
         ) as cur:
             rows = await cur.fetchall()
-        return [{"id": r["id"], "title": r["title"], "object_type": r["object_type"],
-                 "industry": r["industry"], "status": r["status"],
-                 "created_at": r["created_at"], "updated_at": r["updated_at"]} for r in rows]
+        return [{"id": r["id"], "title": r["title"],
+                 "object_type": r["object_type"], "industry": r["industry"],
+                 "status": r["status"],
+                 "created_at": r["created_at"], "updated_at": r["updated_at"]}
+                for r in rows]
     finally:
         await db.close()
 
@@ -191,33 +199,36 @@ async def delete_tz(item_id: str):
 
 @router.get("/{item_id}/history")
 async def get_history(item_id: str):
-    """История изменений ТЗ."""
     db = await get_db()
     try:
         async with db.execute(
-            "SELECT id,action,description,changed_lines,created_at FROM tz_history WHERE tz_id=? ORDER BY created_at DESC",
+            "SELECT id,action,description,changed_lines,created_at "
+            "FROM tz_history WHERE tz_id=? ORDER BY created_at DESC",
             (item_id,)
         ) as cur:
             rows = await cur.fetchall()
-        return [{"id": r["id"], "action": r["action"], "description": r["description"],
-                 "changed_lines": r["changed_lines"], "created_at": r["created_at"]} for r in rows]
+        return [{"id": r["id"], "action": r["action"],
+                 "description": r["description"],
+                 "changed_lines": r["changed_lines"],
+                 "created_at": r["created_at"]} for r in rows]
     finally:
         await db.close()
 
 
 @router.get("/{item_id}/history/{entry_id}")
 async def get_history_entry(item_id: str, entry_id: str):
-    """Diff конкретной записи истории."""
     db = await get_db()
     try:
         async with db.execute(
-            "SELECT * FROM tz_history WHERE id=? AND tz_id=?", (entry_id, item_id)
+            "SELECT * FROM tz_history WHERE id=? AND tz_id=?",
+            (entry_id, item_id)
         ) as cur:
             row = await cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Запись не найдена")
         return {
-            "id": row["id"], "action": row["action"], "description": row["description"],
+            "id": row["id"], "action": row["action"],
+            "description": row["description"],
             "diff": json.loads(row["diff"] or "[]"),
             "changed_lines": row["changed_lines"],
             "old_content": row["old_content"],
@@ -230,11 +241,12 @@ async def get_history_entry(item_id: str, entry_id: str):
 
 @router.post("/{item_id}/accept")
 async def accept_patch(item_id: str, req: AcceptRequest):
-    """User принимает патч — сохраняет и записывает в историю."""
     now = datetime.utcnow().isoformat()
     db = await get_db()
     try:
-        async with db.execute("SELECT content FROM tz_items WHERE id=?", (item_id,)) as cur:
+        async with db.execute(
+            "SELECT content FROM tz_items WHERE id=?", (item_id,)
+        ) as cur:
             row = await cur.fetchone()
         old_content = row["content"] if row else ""
         await db.execute(
@@ -242,7 +254,8 @@ async def accept_patch(item_id: str, req: AcceptRequest):
             (req.content, req.status, now, item_id))
         await db.commit()
         diff = req.diff or make_diff(old_content, req.content)
-        changed = req.changed_lines or sum(1 for d in diff if d.get("type") in ("add", "remove"))
+        changed = req.changed_lines or sum(
+            1 for d in diff if d.get("type") in ("add", "remove"))
         await add_history(db, item_id, req.action or "accept",
                           req.description or "Изменения приняты",
                           old_content, req.content, diff, changed)
@@ -251,7 +264,7 @@ async def accept_patch(item_id: str, req: AcceptRequest):
     return {"status": "accepted"}
 
 
-# ── Review ──────────────────────────────────────────────────────────────────
+# ── Review ─────────────────────────────────────────────────────────────────
 
 @router.post("/{item_id}/review")
 async def review_tz(item_id: str):
@@ -271,12 +284,14 @@ async def review_tz(item_id: str):
 
     db = await get_db()
     try:
-        await db.execute("UPDATE tz_items SET status='reviewed', updated_at=? WHERE id=?",
-                         (datetime.utcnow().isoformat(), item_id))
+        await db.execute(
+            "UPDATE tz_items SET status='reviewed', updated_at=? WHERE id=?",
+            (datetime.utcnow().isoformat(), item_id))
         await db.commit()
     finally:
         await db.close()
-    return {"technical": issues_r, "normative": issues_v, "completeness": issues_f,
+    return {"technical": issues_r, "normative": issues_v,
+            "completeness": issues_f,
             "total": len(issues_r) + len(issues_v) + len(issues_f)}
 
 
@@ -300,8 +315,10 @@ async def questions_tz(item_id: str):
 
     existing_block = ""
     if existing_qs:
-        existing_block = "\n\nУЖЕ ЗАДАННЫЕ ВОПРОСЫ (НЕ ДУБЛИРОВАТЬ):\n" + \
-                        "\n".join(f"- {q['question']}" for q in existing_qs)
+        existing_block = (
+            "\n\nУЖЕ ЗАДАННЫЕ ВОПРОСЫ (НЕ ДУБЛИРОВАТЬ):\n"
+            + "\n".join(f"- {q['question']}" for q in existing_qs)
+        )
 
     ai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     resp = await ai.chat.completions.create(
@@ -309,16 +326,18 @@ async def questions_tz(item_id: str):
         messages=[{"role": "user", "content":
             f"""Ты эксперт по ТЗ. Объект: {object_type}
 ТЗ:\n{content[:6000]}{existing_block}
-Сформулируй 5–8 НОВЫХ вопросов по пробелам. Не повторяй уже заданные.
+Сформулируй 5–8 НОВЫХ вопросов. Не повторяй уже заданные.
 JSON: {{"questions": [{{"question": "...", "section": "...", "why": "..."}}]}}"""
         }],
         temperature=0.4,
         response_format={"type": "json_object"},
     )
     try:
-        new_qs = json.loads(resp.choices[0].message.content).get("questions", [])
+        new_qs = json.loads(
+            resp.choices[0].message.content).get("questions", [])
     except Exception:
-        new_qs = [{"question": "Уточните требования.", "section": "", "why": ""}]
+        new_qs = [{"question": "Уточните требования.",
+                   "section": "", "why": ""}]
 
     for q in new_qs:
         q.setdefault("answered", False)
@@ -328,8 +347,10 @@ JSON: {{"questions": [{{"question": "...", "section": "...", "why": "..."}}]}}""
     all_qs = existing_qs + new_qs
     db = await get_db()
     try:
-        await db.execute("UPDATE tz_items SET questions=?, updated_at=? WHERE id=?",
-                         (json.dumps(all_qs, ensure_ascii=False), datetime.utcnow().isoformat(), item_id))
+        await db.execute(
+            "UPDATE tz_items SET questions=?, updated_at=? WHERE id=?",
+            (json.dumps(all_qs, ensure_ascii=False),
+             datetime.utcnow().isoformat(), item_id))
         await db.commit()
     finally:
         await db.close()
@@ -338,10 +359,12 @@ JSON: {{"questions": [{{"question": "...", "section": "...", "why": "..."}}]}}""
 
 # ── Answer single question → patch ─────────────────────────────────────────
 
-async def answer_patch_generator(item_id: str, req: QuestionAnswerRequest) -> AsyncGenerator[str, None]:
+async def answer_patch_generator(
+        item_id: str, req: QuestionAnswerRequest) -> AsyncGenerator[str, None]:
     db = await get_db()
     try:
-        async with db.execute("SELECT * FROM tz_items WHERE id=?", (item_id,)) as cur:
+        async with db.execute(
+                "SELECT * FROM tz_items WHERE id=?", (item_id,)) as cur:
             row = await cur.fetchone()
         if not row:
             yield f"data: {json.dumps({'type':'error','message':'ТЗ не найдено'}, ensure_ascii=False)}\n\n"
@@ -353,8 +376,10 @@ async def answer_patch_generator(item_id: str, req: QuestionAnswerRequest) -> As
         await db.close()
 
     form_ext = dict(form)
-    form_ext["extra_requirements"] = \
-        (form.get("extra_requirements") or "") + f"\nОтвет на '{req.question}': {req.answer}"
+    form_ext["extra_requirements"] = (
+        (form.get("extra_requirements") or "")
+        + f"\nОтвет на '{req.question}': {req.answer}"
+    )
 
     yield f"data: {json.dumps({'type':'status','message':'🤖 DeepSeek анализирует...'}, ensure_ascii=False)}\n\n"
     issues = await critique(old_content, "refine", form_ext)
@@ -362,11 +387,14 @@ async def answer_patch_generator(item_id: str, req: QuestionAnswerRequest) -> As
         yield f"data: {json.dumps({'type':'issues','issues':issues}, ensure_ascii=False)}\n\n"
 
     yield f"data: {json.dumps({'type':'status','message':'✍️ GPT-4o готовит правку...'}, ensure_ascii=False)}\n\n"
-    context_chunks = search(f"{form.get('object_type','')} {form.get('description','')}", n_results=6)
+    context_chunks = search(
+        f"{form.get('object_type','')} {form.get('description','')}",
+        n_results=6)
 
     new_tokens: List[str] = []
-    async for token in stream_stage(context_chunks=context_chunks, form=form_ext,
-                                    issues=issues, stage="refine", previous_draft=old_content):
+    async for token in stream_stage(
+            context_chunks=context_chunks, form=form_ext,
+            issues=issues, stage="refine", previous_draft=old_content):
         new_tokens.append(token)
         yield f"data: {json.dumps({'type':'token','text':token}, ensure_ascii=False)}\n\n"
 
@@ -380,8 +408,10 @@ async def answer_patch_generator(item_id: str, req: QuestionAnswerRequest) -> As
 
     db = await get_db()
     try:
-        await db.execute("UPDATE tz_items SET questions=?, updated_at=? WHERE id=?",
-                         (json.dumps(questions, ensure_ascii=False), datetime.utcnow().isoformat(), item_id))
+        await db.execute(
+            "UPDATE tz_items SET questions=?, updated_at=? WHERE id=?",
+            (json.dumps(questions, ensure_ascii=False),
+             datetime.utcnow().isoformat(), item_id))
         await db.commit()
     finally:
         await db.close()
@@ -392,17 +422,30 @@ async def answer_patch_generator(item_id: str, req: QuestionAnswerRequest) -> As
 
 @router.post("/{item_id}/answer")
 async def answer_question(item_id: str, req: QuestionAnswerRequest):
-    return StreamingResponse(answer_patch_generator(item_id, req),
-                             media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return StreamingResponse(
+        answer_patch_generator(item_id, req),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-# ── Prompt-based improvement ───────────────────────────────────────────────
+# ── Prompt-based improvement ──────────────────────────────────────────────
 
-async def prompt_refine_generator(item_id: str, user_prompt: str) -> AsyncGenerator[str, None]:
+async def prompt_refine_generator(
+        item_id: str,
+        user_prompt: str,
+        with_review: bool = False) -> AsyncGenerator[str, None]:
+    """
+    1. GPT-4o выполняет инструкцию (streaming).
+    2. Если with_review=True — DeepSeek проверяет результат, отправляет замечания.
+    3. Отправляет patch_ready — не сохраняет автоматически.
+    """
+    from openai import AsyncOpenAI
+    import os
+
     db = await get_db()
     try:
-        async with db.execute("SELECT * FROM tz_items WHERE id=?", (item_id,)) as cur:
+        async with db.execute(
+                "SELECT * FROM tz_items WHERE id=?", (item_id,)) as cur:
             row = await cur.fetchone()
         if not row:
             yield f"data: {json.dumps({'type':'error','message':'ТЗ не найдено'}, ensure_ascii=False)}\n\n"
@@ -412,27 +455,21 @@ async def prompt_refine_generator(item_id: str, user_prompt: str) -> AsyncGenera
     finally:
         await db.close()
 
-    from openai import AsyncOpenAI
-    import os
-
-    yield f"data: {json.dumps({'type':'status','message':'🤖 Анализирую ТЗ...'}, ensure_ascii=False)}\n\n"
-
     ai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-    # Стриминговый ответ на промпт пользователя
-    system_msg = (
-        "Ты эксперт по техническим заданиям. Тебе дано ТЗ и инструкция по его улучшению. "
-        "Выведи полное обновлённое ТЗ целиком, сохраняя все незатронутые разделы."
-    )
-    user_msg = f"Инструкция: {user_prompt}\n\nТС:овременное ТЗ:\n{old_content}"
-
+    # ─ Шаг 1: GPT-4o
     yield f"data: {json.dumps({'type':'status','message':'✍️ GPT-4o выполняет инструкцию...'}, ensure_ascii=False)}\n\n"
 
     stream = await ai.chat.completions.create(
         model="gpt-4o",
         messages=[
-            {"role": "system", "content": system_msg},
-            {"role": "user",   "content": user_msg},
+            {"role": "system",
+             "content": (
+                 "Ты эксперт по техническим заданиям. Тебе дано ТЗ и инструкция по его улучшению. "
+                 "Выведи полное обновлённое ТЗ целиком, сохраняя все незатронутые разделы."
+             )},
+            {"role": "user",
+             "content": f"Инструкция: {user_prompt}\n\nТекущее ТЗ:\n{old_content}"},
         ],
         temperature=0.4,
         stream=True,
@@ -446,6 +483,22 @@ async def prompt_refine_generator(item_id: str, user_prompt: str) -> AsyncGenera
             yield f"data: {json.dumps({'type':'token','text':token}, ensure_ascii=False)}\n\n"
 
     new_content = "".join(new_tokens)
+
+    # ─ Шаг 2 (опционально): вторичная проверка DeepSeek
+    review_issues: List[str] = []
+    if with_review:
+        yield f"data: {json.dumps({'type':'status','message':'🤖 DeepSeek проверяет результат...'}, ensure_ascii=False)}\n\n"
+        # Прогоняем по всем трём осям
+        r_tech = await critique(new_content, "refine", form)
+        r_norm = await critique(new_content, "verify", form)
+        r_comp = await critique(new_content, "final",  form)
+        review_issues = r_tech + r_norm + r_comp
+        if review_issues:
+            yield f"data: {json.dumps({'type':'review_issues','issues':review_issues,'counts':{'technical':len(r_tech),'normative':len(r_norm),'completeness':len(r_comp)}}, ensure_ascii=False)}\n\n"
+        else:
+            yield f"data: {json.dumps({'type':'review_issues','issues':[],'counts':{'technical':0,'normative':0,'completeness':0}}, ensure_ascii=False)}\n\n"
+
+    # ─ Шаг 3: diff и patch_ready
     diff = make_diff(old_content, new_content)
     changed = sum(1 for d in diff if d["type"] in ("add", "remove"))
 
@@ -455,18 +508,21 @@ async def prompt_refine_generator(item_id: str, user_prompt: str) -> AsyncGenera
 
 @router.post("/{item_id}/prompt-refine")
 async def prompt_refine(item_id: str, req: PromptRefineRequest):
-    """Улучшение ТЗ по свободному промпту (стриминг, не сохраняет автоматически)."""
-    return StreamingResponse(prompt_refine_generator(item_id, req.prompt),
-                             media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    """Улучшение по свободному промпту. Опциональная проверка DeepSeek."""
+    return StreamingResponse(
+        prompt_refine_generator(item_id, req.prompt, req.with_review),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-# ── Refine batch ──────────────────────────────────────────────────────────────
+# ── Refine batch ─────────────────────────────────────────────────────────────
 
-async def refine_stream_generator(item_id: str, answers: dict) -> AsyncGenerator[str, None]:
+async def refine_stream_generator(
+        item_id: str, answers: dict) -> AsyncGenerator[str, None]:
     db = await get_db()
     try:
-        async with db.execute("SELECT * FROM tz_items WHERE id=?", (item_id,)) as cur:
+        async with db.execute(
+                "SELECT * FROM tz_items WHERE id=?", (item_id,)) as cur:
             row = await cur.fetchone()
         if not row:
             yield f"data: {json.dumps({'type':'error','message':'ТЗ не найдено'}, ensure_ascii=False)}\n\n"
@@ -477,8 +533,10 @@ async def refine_stream_generator(item_id: str, answers: dict) -> AsyncGenerator
         await db.close()
 
     if answers:
-        form["extra_requirements"] = \
-            (form.get("extra_requirements") or "") + "\n" + "; ".join(f"{k}: {v}" for k, v in answers.items())
+        form["extra_requirements"] = (
+            (form.get("extra_requirements") or "")
+            + "\n" + "; ".join(f"{k}: {v}" for k, v in answers.items())
+        )
 
     yield f"data: {json.dumps({'type':'status','message':'🤖 DeepSeek анализирует ТЗ...'}, ensure_ascii=False)}\n\n"
     issues = await critique(old_content, "refine", form)
@@ -486,11 +544,14 @@ async def refine_stream_generator(item_id: str, answers: dict) -> AsyncGenerator
         yield f"data: {json.dumps({'type':'issues','issues':issues}, ensure_ascii=False)}\n\n"
 
     yield f"data: {json.dumps({'type':'status','message':'✍️ GPT-4o дорабатывает ТЗ...'}, ensure_ascii=False)}\n\n"
-    context_chunks = search(f"{form.get('object_type','')} {form.get('description','')}", n_results=8)
+    context_chunks = search(
+        f"{form.get('object_type','')} {form.get('description','')}",
+        n_results=8)
 
     new_tokens: List[str] = []
-    async for token in stream_stage(context_chunks=context_chunks, form=form,
-                                    issues=issues, stage="refine", previous_draft=old_content):
+    async for token in stream_stage(
+            context_chunks=context_chunks, form=form,
+            issues=issues, stage="refine", previous_draft=old_content):
         new_tokens.append(token)
         yield f"data: {json.dumps({'type':'token','text':token}, ensure_ascii=False)}\n\n"
 
@@ -504,6 +565,7 @@ async def refine_stream_generator(item_id: str, answers: dict) -> AsyncGenerator
 
 @router.post("/{item_id}/refine")
 async def refine_tz(item_id: str, req: RefineRequest):
-    return StreamingResponse(refine_stream_generator(item_id, req.answers or {}),
-                             media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return StreamingResponse(
+        refine_stream_generator(item_id, req.answers or {}),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
