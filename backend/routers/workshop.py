@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 DB_PATH = Path(__file__).parent.parent.parent / "workshop.db"
 
 
-# ── DB ──────────────────────────────────────────────────────────────────
+# ── DB ───────────────────────────────────────────────────────────────────────
 
 async def get_db():
     db = await aiosqlite.connect(DB_PATH)
@@ -93,7 +93,7 @@ async def add_history(db, tz_id: str, action: str, description: str,
     await db.commit()
 
 
-# ── Schemas ─────────────────────────────────────────────────────────────────
+# ── Schemas ────────────────────────────────────────────────────────────────────────
 
 class SaveRequest(BaseModel):
     title: str
@@ -117,13 +117,13 @@ class QuestionAnswerRequest(BaseModel):
 
 class PromptRefineRequest(BaseModel):
     prompt: str
-    with_review: bool = False   # вторичная проверка DeepSeek после GPT-4o
+    with_review: bool = False
 
 class RefineRequest(BaseModel):
     answers: Optional[dict] = {}
 
 
-# ── CRUD ───────────────────────────────────────────────────────────────────
+# ── CRUD ─────────────────────────────────────────────────────────────────────────
 
 @router.post("/save")
 async def save_tz(req: SaveRequest):
@@ -264,7 +264,7 @@ async def accept_patch(item_id: str, req: AcceptRequest):
     return {"status": "accepted"}
 
 
-# ── Review ─────────────────────────────────────────────────────────────────
+# ── Review ───────────────────────────────────────────────────────────────────────
 
 @router.post("/{item_id}/review")
 async def review_tz(item_id: str):
@@ -295,7 +295,7 @@ async def review_tz(item_id: str):
             "total": len(issues_r) + len(issues_v) + len(issues_f)}
 
 
-# ── Questions ─────────────────────────────────────────────────────────────
+# ── Questions ─────────────────────────────────────────────────────────────────────
 
 @router.post("/{item_id}/questions")
 async def questions_tz(item_id: str):
@@ -357,7 +357,7 @@ JSON: {{"questions": [{{"question": "...", "section": "...", "why": "..."}}]}}""
     return {"questions": all_qs, "new_count": len(new_qs)}
 
 
-# ── Answer single question → patch ─────────────────────────────────────────
+# ── Answer single question → patch ──────────────────────────────────────────────
 
 async def answer_patch_generator(
         item_id: str, req: QuestionAnswerRequest) -> AsyncGenerator[str, None]:
@@ -428,16 +428,57 @@ async def answer_question(item_id: str, req: QuestionAnswerRequest):
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-# ── Prompt-based improvement ──────────────────────────────────────────────
+# ── Auto-expand user prompt ────────────────────────────────────────────────────
+
+async def expand_prompt(user_prompt: str, tz_content: str, form: dict) -> str:
+    """
+    GPT-4o mini расширяет короткую инструкцию пользователя в детальный
+    системный промпт для GPT-4o, учитывая контекст ТЗ.
+    """
+    from openai import AsyncOpenAI
+    import os
+
+    ai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+    object_type = form.get("object_type", "объект")
+    industry    = form.get("industry", "")
+    context_hint = f"Объект: {object_type}"
+    if industry:
+        context_hint += f", отрасль: {industry}"
+
+    resp = await ai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": (
+                "Ты ассистент по подготовке технических заданий. "
+                "Преобразуй короткую инструкцию пользователя в детальный промпт для улучшения ТЗ. "
+                "Учитывай: тип объекта, отрасль, структуру документа, релевантные нормы и стандарты. "
+                "Ответь ТОЛЬКО расширенным промптом, без пояснений и мета-комментариев."
+            )},
+            {"role": "user", "content": (
+                f"{context_hint}\n"
+                f"Первые 2000 символов ТЗ:\n{tz_content[:2000]}\n\n"
+                f"Инструкция пользователя: {user_prompt}\n\n"
+                "Расширь до детального промпта для GPT-4o, который выполнит это улучшение."
+            )},
+        ],
+        temperature=0.3,
+        max_tokens=600,
+    )
+    return resp.choices[0].message.content.strip()
+
+
+# ── Prompt-based improvement ──────────────────────────────────────────────────
 
 async def prompt_refine_generator(
         item_id: str,
         user_prompt: str,
         with_review: bool = False) -> AsyncGenerator[str, None]:
     """
-    1. GPT-4o выполняет инструкцию (streaming).
-    2. Если with_review=True — DeepSeek проверяет результат, отправляет замечания.
-    3. Отправляет patch_ready — не сохраняет автоматически.
+    0. GPT-4o mini авто-расширяет промпт пользователя (отправляет на фронт чтобы отобразить).
+    1. GPT-4o выполняет инструкцию по расширенному промпту (streaming).
+    2. Если with_review=True — DeepSeek проверяет результат.
+    3. patch_ready.
     """
     from openai import AsyncOpenAI
     import os
@@ -457,7 +498,14 @@ async def prompt_refine_generator(
 
     ai = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-    # ─ Шаг 1: GPT-4o
+    # ─ Шаг 0: авто-расширение промпта (GPT-4o mini, быстро)
+    yield f"data: {json.dumps({'type':'status','message':'💡 Расширяю инструкцию...'}, ensure_ascii=False)}\n\n"
+    expanded_prompt = await expand_prompt(user_prompt, old_content, form)
+
+    # Отправляем расширенный промпт на фронт
+    yield f"data: {json.dumps({'type':'expanded_prompt','text':expanded_prompt}, ensure_ascii=False)}\n\n"
+
+    # ─ Шаг 1: GPT-4o выполняет расширенную инструкцию
     yield f"data: {json.dumps({'type':'status','message':'✍️ GPT-4o выполняет инструкцию...'}, ensure_ascii=False)}\n\n"
 
     stream = await ai.chat.completions.create(
@@ -465,11 +513,11 @@ async def prompt_refine_generator(
         messages=[
             {"role": "system",
              "content": (
-                 "Ты эксперт по техническим заданиям. Тебе дано ТЗ и инструкция по его улучшению. "
+                 "Ты эксперт по техническим заданиям. Тебе дано ТЗ и детальная инструкция по его улучшению. "
                  "Выведи полное обновлённое ТЗ целиком, сохраняя все незатронутые разделы."
              )},
             {"role": "user",
-             "content": f"Инструкция: {user_prompt}\n\nТекущее ТЗ:\n{old_content}"},
+             "content": f"Инструкция: {expanded_prompt}\n\nТекущее ТЗ:\n{old_content}"},
         ],
         temperature=0.4,
         stream=True,
@@ -488,15 +536,11 @@ async def prompt_refine_generator(
     review_issues: List[str] = []
     if with_review:
         yield f"data: {json.dumps({'type':'status','message':'🤖 DeepSeek проверяет результат...'}, ensure_ascii=False)}\n\n"
-        # Прогоняем по всем трём осям
         r_tech = await critique(new_content, "refine", form)
         r_norm = await critique(new_content, "verify", form)
         r_comp = await critique(new_content, "final",  form)
         review_issues = r_tech + r_norm + r_comp
-        if review_issues:
-            yield f"data: {json.dumps({'type':'review_issues','issues':review_issues,'counts':{'technical':len(r_tech),'normative':len(r_norm),'completeness':len(r_comp)}}, ensure_ascii=False)}\n\n"
-        else:
-            yield f"data: {json.dumps({'type':'review_issues','issues':[],'counts':{'technical':0,'normative':0,'completeness':0}}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'type':'review_issues','issues':review_issues,'counts':{'technical':len(r_tech),'normative':len(r_norm),'completeness':len(r_comp)}}, ensure_ascii=False)}\n\n"
 
     # ─ Шаг 3: diff и patch_ready
     diff = make_diff(old_content, new_content)
@@ -508,14 +552,13 @@ async def prompt_refine_generator(
 
 @router.post("/{item_id}/prompt-refine")
 async def prompt_refine(item_id: str, req: PromptRefineRequest):
-    """Улучшение по свободному промпту. Опциональная проверка DeepSeek."""
     return StreamingResponse(
         prompt_refine_generator(item_id, req.prompt, req.with_review),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-# ── Refine batch ─────────────────────────────────────────────────────────────
+# ── Refine batch ──────────────────────────────────────────────────────────────────────
 
 async def refine_stream_generator(
         item_id: str, answers: dict) -> AsyncGenerator[str, None]:
